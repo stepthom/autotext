@@ -1,6 +1,7 @@
 import uuid
 import sys
 #import logging
+import argparse
 
 import json
 
@@ -86,11 +87,16 @@ scorer = autosklearn.metrics.make_scorer(
 
 
 def main():
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("settings_file", help="Path to JSON settings/config file.")
+    args = parser.parse_args()
+
     runname = uuid.uuid4()
     print("Run name: {}".format(runname))
 
     # Read settings
-    with open('settings_small.json') as f:
+    with open(args.settings_file) as f:
         config=json.load(f)
 
     print("Read settings:")
@@ -148,11 +154,11 @@ def main():
 
 
       pipe = autosklearn.classification.AutoSklearnClassifier(
-            time_left_for_this_task=config['time_left_for_this_task=config'],
+            time_left_for_this_task=config['time_left_for_this_task'],
             metric=scorer,
-            n_jobs=1,
+            n_jobs=10,
             seed=42,
-            memory_limit=5072,
+            memory_limit=9072,
             exclude_estimators=config['exclude_estimators'],
             )
 
