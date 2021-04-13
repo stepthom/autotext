@@ -1,7 +1,7 @@
 import uuid
 import sys
-#import logging
 import argparse
+import numpy as np
 
 import json
 
@@ -19,6 +19,8 @@ from sklearn.model_selection import train_test_split
 import autosklearn.classification
 from autosklearn.metrics import balanced_accuracy, precision, recall, f1
 import ConfigSpace.read_and_write.json as config_json
+
+from datetime import datetime
 
 
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -65,6 +67,7 @@ class TextTransformer():
     def fit(self, X, y=None):
         self.vectorizer = self.vectorizer.fit(X)
         if self.decomposition  is not None:
+            print("in fit, decomp. now={}".format(datetime.now()))
             _dtm = self.vectorizer.transform(X)
             self.decomposition  = self.decomposition.fit(_dtm)
         return self
@@ -105,30 +108,37 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("settings_file", help="Path to JSON settings/config file.")
     args = parser.parse_args()
+    runname = str(uuid.uuid4())
 
-    runname = uuid.uuid4()
     print("Run name: {}".format(runname))
 
-    dumpfile = open('out/{}.txt'.format(runname), "w")
+    # This structure will hold all the results and will be dumped to disk.
+    results = {}
+    results['runname'] = runname
 
-    # Read settings
+    # This file will hold debugging output
+    dumpfile = open('out/{}.log'.format(runname), "w")
+
+    # Read the settings file
     with open(args.settings_file) as f:
         config=json.load(f)
 
     print("Read settings:", file=dumpfile)
     print(json.dumps(config, indent=4, sort_keys=True), file=dumpfile)
 
+    results['settings'] = config
+
     print("Reading data file...", file=dumpfile)
     df = pd.read_csv(config['filename'])
     print("Done. Shape = {}".format(df.shape), file=dumpfile)
 
 
-    # Kaggle Test Solutions
-    df_kaggle = None
+    # Test file
+    df_test = None
     if 'test_filename' in config and config['test_filename'] is not None:
-        print("Reading Kaggle test data file...")
-        df_kaggle = pd.read_csv(config['test_filename'])
-        print("Done. Shape = {}".format(df_kaggle.shape))
+        print("Reading test data file...")
+        df_test = pd.read_csv(config['test_filename'])
+        print("Done. Shape = {}".format(df_test.shape), file=dumpfile)
 
     # Define our Target
     target_col = config['target_col']
@@ -138,7 +148,6 @@ def main():
     drop_list=[col for col in df.columns if col not in [target_col, text_col]]
     df = df.drop(drop_list, axis=1)
 
-    print(df.info())
     max_features        = config.get("max_features", None)
     ngram_ranges        = config.get("ngram_ranges", [1, 1])
     sublinear_tfs       = config.get("sublinear_tfs", False)
@@ -146,11 +155,14 @@ def main():
     decomposition_types = config.get("decomposition_types", [None])
     n_components        = config.get("n_components", None)
 
-    # regular train/test split
-    X_train, X_test, y_train, y_test = train_test_split(df[text_col], df[target_col], test_size=0.2, random_state=1)
+    # regular train/val split
+    X_train, X_val, y_train, y_val = train_test_split(df[text_col], df[target_col], test_size=0.05, random_state=1)
 
     i = 0
     for x in itertools.product(max_features, ngram_ranges, sublinear_tfs, stopwords, decomposition_types, n_components):
+
+      results[i] = {}
+      results[i]['settings'] = x
       print("#" * 80)
       print("Combo: {}".format(x))
 
@@ -166,18 +178,20 @@ def main():
       tt = tt.fit(X_train)
 
       features_train = tt.transform(X_train)
-      features_test = tt.transform(X_test)
-      if df_kaggle is not None:
-        features_kaggle = tt.transform(df_kaggle[text_col])
-      print("Done: shape={}".format(features_train.shape))
+      features_val = tt.transform(X_val)
+      if df_test is not None:
+        features_test = tt.transform(df_test[text_col])
+      print("..done: features_train shape={}".format(features_train.shape))
 
-      print("Running autosklearn for {} seconds...".format(config['time_left_for_this_task']))
+      time = config.get('time_left_for_this_task', 100)
+      jobs = config.get('n_jobs', 1)
 
+      print("Running autosklearn for {} seconds on {} jobs...".format(time, jobs))
 
       pipe = autosklearn.classification.AutoSklearnClassifier(
-            time_left_for_this_task=config['time_left_for_this_task'],
+            time_left_for_this_task=time,
             metric=scorer,
-            n_jobs=20,
+            n_jobs=jobs,
             seed=42,
             memory_limit=9072,
             include_preprocessors=["no_preprocessing", ],
@@ -186,56 +200,53 @@ def main():
 
       pipe = pipe.fit(features_train, y_train)
 
-      print("Done fitting autosklearn.")
+      print("... done fitting autosklearn.")
 
       def get_metrics(y_true, y_pred):
-          accuracy       = accuracy_score(y_true, y_pred)
-          f1             = f1_score(y_true, y_pred, average="macro")
-          recall         = recall_score(y_true, y_pred, average="macro")
-          precision      = precision_score(y_true, y_pred, average="macro")
-          return [accuracy, f1, recall, precision]
+          res = {}
+          res['accuracy']       = accuracy_score(y_true, y_pred)
+          res['f1']             = f1_score(y_true, y_pred, average="macro")
+          res['recall']         = recall_score(y_true, y_pred, average="macro")
+          res['precision']      = precision_score(y_true, y_pred, average="macro")
+          return res
 
-      y_pred = pipe.predict(features_test)
-      metrics_test = get_metrics(y_test, y_pred)
+      y_pred = pipe.predict(features_val)
+      results[i]['val_metrics'] = get_metrics(y_val, y_pred)
 
-      metrics_kaggle = []
-      if df_kaggle is not None:
-        y_pred_kaggle = pipe.predict(features_kaggle)
-        metrics_kaggle = get_metrics(df_kaggle[target_col], y_pred_kaggle)
-        print('Kaggle results:', file=dumpfile)
-        print(classification_report(df_kaggle[target_col], y_pred_kaggle), file=dumpfile)
+      if df_test is not None:
+        y_pred_test = pipe.predict(features_test)
+        df_test['pred'] = y_pred_test
+        df_test.to_csv('out/{}-test_pred.csv'.format(runname), index=False)
+        if target_col in df_test:
+            results[i]['test_metrics'] = get_metrics(df_test[target_col], y_pred_test)
+            print('Test results:', file=dumpfile)
+            print(classification_report(df_test[target_col], y_pred_test), file=dumpfile)
 
-      lst = [x[0], x[1], x[2], x[3], x[4], x[5]] + metrics_test + metrics_kaggle
-
-      print("Results: {}".format(lst), file=dumpfile)
-      res = pd.DataFrame([lst])
-      res.to_csv("out/{}-{}.csv".format(runname, i), index=False)
-
-      dumpfile.flush()
-
-      def get_metric_result(cv_results):
-          results = pd.DataFrame.from_dict(cv_results)
-          results = results[results['status'] == "Success"]
-          cols = ['rank_test_scores', 'param_classifier:__choice__', 'mean_test_score']
-          cols.extend([key for key in cv_results.keys() if key.startswith('metric_')])
-          results.sort_values(by=['rank_test_scores'])
-          return results[cols]
-
-      print(classification_report(y_test, y_pred), file=dumpfile)
-
+      print(classification_report(y_val, y_pred), file=dumpfile)
       print(pipe.sprint_statistics(), file=dumpfile)
-
       print(pipe.show_models(), file=dumpfile)
 
-      dumpfile.write("#" * 80)
-      dumpfile.write("Metric results")
-      dumpfile.write(get_metric_result(pipe.cv_results_).to_string(index=False))
+      #results[i]['cv_results'] = dict(np.ndenumerate(pipe.cv_results_))
+      cv = pipe.cv_results_
+      cv_df = pd.DataFrame.from_dict(cv)
+      cv_df.to_csv('out/{}-cv.csv'.format(runname), index=False)
+      results[i]['cv_results'] = {}
+      for index, row in cv_df.iterrows():
+          results[i]['cv_results'][index] = {}
+          results[i]['cv_results'][index]['mean_test_score'] = row['mean_test_score']
+          results[i]['cv_results'][index]['mean_fit_time'] = row['mean_fit_time']
+          results[i]['cv_results'][index]['rank_test_scores'] = row['rank_test_scores']
+          results[i]['cv_results'][index]['status'] = row['status']
+          results[i]['cv_results'][index]['params'] = row['params']
+      #for key, value in cv.items():
+          #print("key={}, value={}".format(key, value))
+          #print(type(key))
+          #print(type(value))
+          #results[i]['cv_results'][key] = value
 
-      for run_key in pipe.automl_.runhistory_.data:
-        print('#########', file=dumpfile)
-        print(json.dumps(run_key), file=dumpfile)
-        print((pipe.automl_.runhistory_.ids_config[run_key.config_id]), file=dumpfile)
-        print(pipe.automl_.runhistory_.data[run_key], file=dumpfile)
+      dumpfile.flush()
+      with open('out/{}-results.json'.format(runname), 'w') as fp:
+        json.dump(results, fp, indent=4)
 
       i = i + 1
 
