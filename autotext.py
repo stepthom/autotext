@@ -119,27 +119,57 @@ def do_gbc(config, features_train, y_train, features_val, y_val, features_test, 
     res = {}
     jobs = config.get('n_jobs', 1)
 
-    param_grid = {
-                   "max_depth": [1, 3, 5, None],
-                   "learning_rate": [0.05, 0.07, 0.1, 0.15, 0.2, 0.3, 1.0],
-                  "min_samples_split": [5, 10]}
-
-    print("Running GBC")
-
     clf = GradientBoostingClassifier(n_estimators=200, learning_rate=1.0,
             max_depth=1, random_state=0)
+    param_grid = {
+                  "max_depth": [5, 10],
+                  "learning_rate": [0.07, 0.1, 0.15, 0.2, 0.3],
+                  "n_estimators": [250]}
 
-    pipe = GridSearchCV(clf, param_grid, cv=1, n_jobs=jobs, verbose=2, random_state=0)
-
-
+    print("Running GBC")
+    pipe = GridSearchCV(clf, param_grid, cv=2, n_jobs=jobs, verbose=0)
     pipe = pipe.fit(features_train, y_train)
+    print("... done fitting GBC.")
 
     res['best_params'] = pipe.best_params_
 
 
+    res['train_metrics'] = get_metrics(y_train, pipe.predict(features_train))
+    res['val_metrics']   = get_metrics(y_val, pipe.predict(features_val))
+    if features_test is not None and y_test is not None:
+        y_pred_test = pipe.predict(features_test)
+        res['test_metrics']   = get_metrics(y_test, y_pred_test)
+        print('Test results:')
+        print(classification_report(y_test, y_pred_test))
 
+    return res
 
-    print("... done fitting GBC.")
+import lightgbm as lgb
+from lightgbm import LGBMClassifier
+#from sklearn.model_selection import GridSearchCV
+def do_lgbm(config, features_train, y_train, features_val, y_val, features_test, y_test):
+    res = {}
+    jobs = config.get('n_jobs', 1)
+
+    clf = LGBMClassifier(silent=True, learning_rate=1.0, objective='binary', random_state=0)
+    param_grid = {
+                  "num_leaves": [31, 63, 100],
+                  "max_depth": [5, 7, 15, None],
+                  "learning_rate": [0.07, 0.866, 0.1, 0.12, 0.15, 0.2],
+                  "n_estimators": [100, 250, 400, 500]}
+
+    print("Running LightGBM")
+    pipe = GridSearchCV(clf, param_grid, cv=2, n_jobs=jobs, verbose=1)
+    pipe = pipe.fit(features_train, y_train,
+        eval_metric='f1',
+        eval_set=[(features_test, y_test)],
+        early_stopping_rounds=50,
+        verbose=False,
+                        )
+    print("... done fitting LightGBM.")
+
+    res['best_params'] = pipe.best_params_
+
     res['train_metrics'] = get_metrics(y_train, pipe.predict(features_train))
     res['val_metrics']   = get_metrics(y_val, pipe.predict(features_val))
     if features_test is not None and y_test is not None:
@@ -181,6 +211,14 @@ def main():
     # Define our Target
     target_col = config['target_col']
 
+    # Quick sanity check
+    for filenames in config.get('filenames', []):
+        for filename in filenames:
+            print("Checking existence of {}...".format(filename))
+            if not os.path.isfile(filename):
+                print("Does not exist! Exiting.")
+                return 1
+
     i = 0
     for filenames in config.get('filenames', []):
         print("Reading features...")
@@ -199,19 +237,26 @@ def main():
         results[i] = {}
         results[i]['filenames'] = filenames
 
+
+        #results[i]['lr'] = do_lr(config, features_train, y_train, features_val, y_val, features_test, y_test)
+
+        with open('out/{}-results.json'.format(runname), 'w') as fp:
+            json.dump(results, fp, indent=4)
+
+        results[i]['lgbm'] = do_lgbm(config, features_train, y_train, features_val, y_val, features_test, y_test)
+
+        with open('out/{}-results.json'.format(runname), 'w') as fp:
+            json.dump(results, fp, indent=4)
+
+        #results[i]['gbc'] = do_gbc(config, features_train, y_train, features_val, y_val, features_test, y_test)
+
+        with open('out/{}-results.json'.format(runname), 'w') as fp:
+            json.dump(results, fp, indent=4)
+
+
         #results[i]['autosklearn'] = do_autosklearn(config, features_train, y_train, features_val, y_val, features_test, y_test)
 
         dumpfile.flush()
-        with open('out/{}-results.json'.format(runname), 'w') as fp:
-            json.dump(results, fp, indent=4)
-
-        results[i]['lr'] = do_lr(config, features_train, y_train, features_val, y_val, features_test, y_test)
-
-        with open('out/{}-results.json'.format(runname), 'w') as fp:
-            json.dump(results, fp, indent=4)
-
-        results[i]['gbc'] = do_gbc(config, features_train, y_train, features_val, y_val, features_test, y_test)
-
         with open('out/{}-results.json'.format(runname), 'w') as fp:
             json.dump(results, fp, indent=4)
 
