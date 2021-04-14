@@ -1,0 +1,15 @@
+{
+    "project_name": "small",
+    "filename": "data/small_train.csv",
+    "target_col": "defaulted",
+    "text_col": "en_clean",
+    "test_filename": "data/small_test.csv",
+
+    "ngram_ranges": [[1,1]],
+    "max_features": [100, 200],
+    "sublinear_tfs": [false],
+    "stopwords":     ["english", null],
+    "decomposition_types":  ["SVD"],
+    "n_components":  [10, 25]
+
+}

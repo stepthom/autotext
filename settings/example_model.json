@@ -1,0 +1,27 @@
+{
+    "filenames": [
+        ["data/small-100-[1, 1]-False-english-SVD-10-features_train.csv", 
+         "data/small-100-[1, 1]-False-english-SVD-10-features_val.csv", 
+         "data/small-100-[1, 1]-False-english-SVD-10-features_test.csv"],
+
+        ["data/small-200-[1, 1]-False-english-SVD-10-features_train.csv", 
+         "data/small-200-[1, 1]-False-english-SVD-10-features_val.csv", 
+         "data/small-200-[1, 1]-False-english-SVD-10-features_test.csv"]
+    ],
+    "target_col": "label",
+
+    "time_left_for_this_task": 30,
+    "n_jobs": 5,
+    "exclude_estimators": [
+        "k_nearest_neighbors",  
+        "mlp",
+        "gaussian_nb", 
+        "bernoulli_nb", 
+        "multinomial_nb",
+        "decision_tree", 
+        "lda",
+        "liblinear_svc", 
+        "libsvm_svc", 
+        "qda"]
+
+}
