@@ -8,6 +8,7 @@ import json
 import pandas as pd
 import itertools
 import os
+import socket
 
 import sklearn
 from sklearn.metrics import classification_report
@@ -18,7 +19,7 @@ import autosklearn.classification
 from autosklearn.metrics import balanced_accuracy, precision, recall, f1
 import ConfigSpace.read_and_write.json as config_json
 
-from datetime import datetime
+import datetime
 
 
 def get_metrics(y_true, y_pred):
@@ -27,6 +28,7 @@ def get_metrics(y_true, y_pred):
     res['f1'] = f1_score(y_true, y_pred, average="macro")
     res['recall'] = recall_score(y_true, y_pred, average="macro")
     res['precision'] = precision_score(y_true, y_pred, average="macro")
+    res['report'] = classification_report(y_true, y_pred, output_dict=True)
     return res
 
 scorer = autosklearn.metrics.make_scorer(
@@ -34,7 +36,7 @@ scorer = autosklearn.metrics.make_scorer(
     sklearn.metrics.f1_score
 )
 
-def do_autosklearn(config, features_train, y_train, features_val, y_val, features_test, y_test):
+def do_autosklearn(config, features_train, y_train, ffeatures_test, y_test):
     res = {}
 
     time = config.get('time_left_for_this_task', 100)
@@ -54,7 +56,6 @@ def do_autosklearn(config, features_train, y_train, features_val, y_val, feature
     pipe = pipe.fit(features_train, y_train)
 
     print("... done fitting autosklearn.")
-
 
     y_pred = pipe.predict(features_val)
     res['val_metrics'] = get_metrics(y_val, y_pred)
@@ -85,102 +86,156 @@ def do_autosklearn(config, features_train, y_train, features_val, y_val, feature
 
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.preprocessing import StandardScaler
-def do_lr(config, features_train, y_train, features_val, y_val, features_test, y_test):
+def do_lr(runname, config, datasets):
     res = {}
     jobs = config.get('n_jobs', 1)
 
     scaler = StandardScaler()
-    scaler = scaler.fit(features_train)
-    features_train = scaler.transform(features_train)
-    features_val = scaler.transform(features_val)
-    if features_test is not None:
-        features_test = scaler.transform(features_test)
+    scaler = scaler.fit(datasets.X_train)
+    _X_train = scaler.transform(datasets.X_train)
+    _X_val = scaler.transform(datasets.X_val)
+    _X_test = scaler.transform(datasets.X_test)
 
     print("Running LR")
     pipe = LogisticRegressionCV(cv=5,
-            Cs=100,
-            max_iter=500,
+            Cs=50,
+            max_iter=5000,
             n_jobs=jobs,
-            random_state=0).fit(features_train, y_train)
+            random_state=0)
+
+    pipe = pipe.fit(datasets.X_train, datasets.y_train)
     print("... done fitting LR.")
-    res['train_metrics'] = get_metrics(y_train, pipe.predict(features_train))
-    res['val_metrics']   = get_metrics(y_val, pipe.predict(features_val))
-    if features_test is not None and y_test is not None:
-        y_pred_test = pipe.predict(features_test)
-        res['test_metrics']   = get_metrics(y_test, y_pred_test)
-        print('Test results:')
-        print(classification_report(y_test, y_pred_test))
 
-    return res
+    _preds_train = pipe.predict(_X_train)
+    res['metrics_train'] = get_metrics(datasets.y_train, _preds_train)
 
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.model_selection import GridSearchCV
-def do_gbc(config, features_train, y_train, features_val, y_val, features_test, y_test):
+    _preds_val = pipe.predict(_X_val)
+    res['metrics_val'] = get_metrics(datasets.y_val, _preds_val)
+
+    _preds_test = pipe.predict(_X_test)
+    if datasets.y_test is not None:
+        res['metrics_test'] = get_metrics(datasets.y_test, _preds_test)
+
+    output_preds = config.get('output_preds', False)
+    if output_preds:
+        _preds_test_fn = 'out/{}-lr-preds.csv'.format(runname)
+        res['preds_test_filename'] = _preds_test_fn
+        _df_test = pd.concat([datasets.X_test, datasets.y_test, pd.DataFrame(_preds_test, columns=['y_preds'])], axis=1)
+        _df_test.to_csv(_preds_test_fn, index=False)
+
+    return datasets, res
+
+
+from flaml import AutoML
+def do_flaml(runname, config, datasets):
     res = {}
+    time = config.get('time_left_for_this_task', 100)
     jobs = config.get('n_jobs', 1)
 
-    clf = GradientBoostingClassifier(n_estimators=200, learning_rate=1.0,
-            max_depth=1, random_state=0)
-    param_grid = {
-                  "max_depth": [5, 10],
-                  "learning_rate": [0.07, 0.1, 0.15, 0.2, 0.3],
-                  "n_estimators": [250]}
+    pipe = AutoML()
+    automl_settings = {
+            "time_budget": time,  # in seconds
+            "metric": 'f1',
+            "task": 'classififcation',
+            "log_file_name": "out/flaml-{}.log".format(runname),
+            "n_jobs": 10,
+            "estimator_list": ['lgbm', 'xgboost', 'catboost', 'extra_tree'],
+            "model_history": True,
+        }
 
-    print("Running GBC")
-    pipe = GridSearchCV(clf, param_grid, cv=2, n_jobs=jobs, verbose=0)
-    pipe = pipe.fit(features_train, y_train)
-    print("... done fitting GBC.")
+    res['automl_settings'] = automl_settings
 
-    res['best_params'] = pipe.best_params_
+    print("Running FLAML")
+    pipe.fit(datasets.X_train, datasets.y_train, X_val=datasets.X_val, y_val=datasets.y_val, **automl_settings)
+    print("... done running FLAML.")
 
+    res['best_estimator'] = pipe.best_estimator
+    res['best_config'] = pipe.best_config
+    res['best_f1_val'] = 1-pipe.best_loss
+    res['best_model'] = '{}'.format(str(pipe.model))
 
-    res['train_metrics'] = get_metrics(y_train, pipe.predict(features_train))
-    res['val_metrics']   = get_metrics(y_val, pipe.predict(features_val))
-    if features_test is not None and y_test is not None:
-        y_pred_test = pipe.predict(features_test)
-        res['test_metrics']   = get_metrics(y_test, y_pred_test)
-        print('Test results:')
-        print(classification_report(y_test, y_pred_test))
+    _preds_train = pipe.predict(datasets.X_train)
+    res['metrics_train'] = get_metrics(datasets.y_train, _preds_train)
 
-    return res
+    _preds_val = pipe.predict(datasets.X_val)
+    res['metrics_val'] = get_metrics(datasets.y_val, _preds_val)
 
-import lightgbm as lgb
-from lightgbm import LGBMClassifier
-#from sklearn.model_selection import GridSearchCV
-def do_lgbm(config, features_train, y_train, features_val, y_val, features_test, y_test):
-    res = {}
-    jobs = config.get('n_jobs', 1)
+    _preds_test = pipe.predict(datasets.X_test)
+    if datasets.y_test is not None:
+        res['metrics_test'] = get_metrics(datasets.y_test, _preds_test)
 
-    clf = LGBMClassifier(silent=True, learning_rate=1.0, objective='binary', random_state=0)
-    param_grid = {
-                  "num_leaves": [31, 63, 100],
-                  "max_depth": [5, 7, 15, None],
-                  "learning_rate": [0.07, 0.866, 0.1, 0.12, 0.15, 0.2],
-                  "n_estimators": [100, 250, 400, 500]}
+    output_preds = config.get('output_preds', False)
+    if output_preds:
+        _preds_test_fn = 'out/{}-flaml-preds.csv'.format(runname)
+        res['preds_test_filename'] = _preds_test_fn
+        _df_test = pd.concat([datasets.X_test, datasets.y_test, pd.DataFrame(_preds_test, columns=['y_preds'])], axis=1)
+        _df_test.to_csv(_preds_test_fn, index=False)
 
-    print("Running LightGBM")
-    pipe = GridSearchCV(clf, param_grid, cv=2, n_jobs=jobs, verbose=1)
-    pipe = pipe.fit(features_train, y_train,
-        eval_metric='f1',
-        eval_set=[(features_test, y_test)],
-        early_stopping_rounds=50,
-        verbose=False,
-                        )
-    print("... done fitting LightGBM.")
+    return datasets, res
 
-    res['best_params'] = pipe.best_params_
-
-    res['train_metrics'] = get_metrics(y_train, pipe.predict(features_train))
-    res['val_metrics']   = get_metrics(y_val, pipe.predict(features_val))
-    if features_test is not None and y_test is not None:
-        y_pred_test = pipe.predict(features_test)
-        res['test_metrics']   = get_metrics(y_test, y_pred_test)
-        print('Test results:')
-        print(classification_report(y_test, y_pred_test))
-
-    return res
+def dump_results(runname, results):
+    with open('out/{}-results.json'.format(runname), 'w') as fp:
+        json.dump(results, fp, indent=4)
 
 
+class DataSets:
+    def __init__(self, train_fn, val_fn, test_fn,
+           X_train,
+           y_train,
+           X_val,
+           y_val,
+           X_test,
+           y_test
+            ):
+        self.train_fn = train_fn
+        self.val_fn = val_fn
+        self.test_fn = test_fn
+
+        self.X_train = X_train
+        self.y_train = y_train
+        self.X_val = X_val
+        self.y_val = y_val
+        self.X_test = X_test
+        self.y_test = y_test
+
+def read_and_split(fn, target_col, index_col=None, drop_cols=[]):
+    _df = pd.read_csv(fn, index_col=index_col)
+
+    for drop_col in drop_cols:
+        _df = _df[_df.columns.drop(list(_df.filter(regex=drop_col)))]
+
+    # For safety; FLAML doens't like these kinds of chars in column names
+    _df.columns.str.replace("[(),:)]", "_", regex=True)
+    _X = _df.drop([target_col], axis=1)
+    _y = _df[target_col]
+    return _X, _y
+
+
+def read_and_split_all(train_fn, val_fn, test_fn, target_col, index_col=None, drop_cols=[]):
+    if not train_fn:
+        raise ValueError('train_fn cannot be null.')
+
+    print("Reading train file...")
+    X_train, y_train = read_and_split(train_fn, target_col, index_col, drop_cols)
+
+    if test_fn is not None:
+        print("Reading test file...")
+        X_test, y_test = read_and_split(test_fn, target_col, index_col)
+    else:
+        print("Creating test data from training...")
+        X_train, X_test, y_train, y_test = train_test_split(X_train, y_train, test_size=0.1, random_state=1)
+
+    if val_fn is not None:
+        print("Reading val file...")
+        X_val, y_val = read_and_split(val_fn, target_col, index_col)
+    else:
+        print("Creating val data from training data...")
+        X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.1, random_state=1)
+
+    return DataSets(train_fn, val_fn, test_fn,
+             X_train, y_train,
+             X_val, y_val,
+             X_test, y_test)
 
 def main():
 
@@ -195,72 +250,52 @@ def main():
     # This structure will hold all the results and will be dumped to disk.
     results = {}
     results['runname'] = runname
-
-    # This file will hold debugging output
-    dumpfile = open('out/{}.log'.format(runname), "w")
+    results['time'] = str(datetime.datetime.now())
+    results['hostname'] = socket.gethostname()
 
     # Read the settings file
     with open(args.settings_file) as f:
         config = json.load(f)
 
-    print("Read settings:", file=dumpfile)
-    print(json.dumps(config, indent=4, sort_keys=True), file=dumpfile)
-
     results['settings'] = config
 
+    train_fn   = config.get('train_filename', None)
+    val_fn     = config.get('val_filename', None)
+    test_fn    = config.get('test_filename', None)
+    index_col  = config.get('index_col', None)
+    target_col = config.get('target_col', None)
+    drop_cols  = config.get('drop_cols', None)
+
+    # Make DataSets
+    datasets = read_and_split_all(train_fn, val_fn, test_fn, target_col, index_col )
+
+    results['X_train_shape'] = datasets.X_train.shape
+    results['y_train_shape'] = datasets.y_train.shape
+    results['X_val_shape'] = datasets.X_val.shape
+    results['y_val_shape'] = datasets.y_val.shape
+    results['X_test_shape'] = datasets.X_test.shape
+    results['y_test_shape'] = datasets.y_test.shape
+    results['X_train_columns'] = datasets.X_train.columns.tolist()
+
+
     # Define our Target
-    target_col = config['target_col']
+    #target_col = 'Will_Downgrade'
+    #df[target_col]=(df['downgrade_within3m']>0)
+    # Drop columns that don't make sense: leakage, IDs, etc.
+    #drop_list=(['My_UID', 'YYYYMM', 'downgrade', 'upgrade', 'downgrade_within3m', 'upgrade_within3m', 'log_diff'])
+    #df = df.drop(drop_list, axis=1)
 
-    # Quick sanity check
-    for filenames in config.get('filenames', []):
-        for filename in filenames:
-            print("Checking existence of {}...".format(filename))
-            if not os.path.isfile(filename):
-                print("Does not exist! Exiting.")
-                return 1
+    datasets, results['lr'] = do_lr(runname, config, datasets)
+    dump_results(runname, results)
 
-    i = 0
-    for filenames in config.get('filenames', []):
-        print("Reading features...")
-        features_train = pd.read_csv(filenames[0])
-        y_train = features_train.pop(target_col)
-        features_val = pd.read_csv(filenames[1])
-        y_val = features_val.pop(target_col)
-        features_test = None
-        y_test = None
-        if (len(filenames) > 2):
-            features_test = pd.read_csv(filenames[2])
-            if target_col in features_test:
-                y_test = features_test.pop(target_col)
-        print("...done")
+    datasets, results['flaml'] = do_flaml(runname, config, datasets)
+    dump_results(runname, results)
 
-        results[i] = {}
-        results[i]['filenames'] = filenames
+    #results['autosklearn'] = do_autosklearn(config, features_train, y_train, features_test, y_test)
+    dump_results(runname, results)
 
+    print("Run name: {}".format(runname))
 
-        #results[i]['lr'] = do_lr(config, features_train, y_train, features_val, y_val, features_test, y_test)
-
-        with open('out/{}-results.json'.format(runname), 'w') as fp:
-            json.dump(results, fp, indent=4)
-
-        results[i]['lgbm'] = do_lgbm(config, features_train, y_train, features_val, y_val, features_test, y_test)
-
-        with open('out/{}-results.json'.format(runname), 'w') as fp:
-            json.dump(results, fp, indent=4)
-
-        #results[i]['gbc'] = do_gbc(config, features_train, y_train, features_val, y_val, features_test, y_test)
-
-        with open('out/{}-results.json'.format(runname), 'w') as fp:
-            json.dump(results, fp, indent=4)
-
-
-        #results[i]['autosklearn'] = do_autosklearn(config, features_train, y_train, features_val, y_val, features_test, y_test)
-
-        dumpfile.flush()
-        with open('out/{}-results.json'.format(runname), 'w') as fp:
-            json.dump(results, fp, indent=4)
-
-        i = i + 1
 
 
 if __name__ == "__main__":
