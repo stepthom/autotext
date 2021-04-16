@@ -96,14 +96,16 @@ def do_lr(runname, config, datasets):
     _X_val = scaler.transform(datasets.X_val)
     _X_test = scaler.transform(datasets.X_test)
 
-    print("Running LR")
     pipe = LogisticRegressionCV(cv=5,
-            Cs=50,
+            Cs=100,
             max_iter=5000,
             n_jobs=jobs,
-            random_state=0)
+            random_state=42)
 
+    print("Running LR")
+    res['starttime'] = str(datetime.datetime.now())
     pipe = pipe.fit(datasets.X_train, datasets.y_train)
+    res['endtime'] = str(datetime.datetime.now())
     print("... done fitting LR.")
 
     _preds_train = pipe.predict(_X_train)
@@ -120,7 +122,11 @@ def do_lr(runname, config, datasets):
     if output_preds:
         _preds_test_fn = 'out/{}-lr-preds.csv'.format(runname)
         res['preds_test_filename'] = _preds_test_fn
-        _df_test = pd.concat([datasets.X_test, datasets.y_test, pd.DataFrame(_preds_test, columns=['y_preds'])], axis=1)
+        _preds_df = pd.DataFrame(_preds_test, columns=['y_preds'])
+        cols = datasets.X_test.columns.tolist() + ['y_test',  'y_pred']
+        _df_test = pd.concat([datasets.X_test.reset_index(drop=True),
+            datasets.y_test.reset_index(drop=True), _preds_df.reset_index(drop=True)], axis=1, ignore_index=True)
+        _df_test.columns = cols
         _df_test.to_csv(_preds_test_fn, index=False)
 
     return datasets, res
@@ -138,15 +144,17 @@ def do_flaml(runname, config, datasets):
             "metric": 'f1',
             "task": 'classififcation',
             "log_file_name": "out/flaml-{}.log".format(runname),
-            "n_jobs": 10,
+            "n_jobs": jobs,
             "estimator_list": ['lgbm', 'xgboost', 'catboost', 'extra_tree'],
             "model_history": True,
         }
 
     res['automl_settings'] = automl_settings
 
-    print("Running FLAML")
+    print("Running FLAML with {} jobs for {} seconds...".format(jobs, time))
+    res['starttime'] = str(datetime.datetime.now())
     pipe.fit(datasets.X_train, datasets.y_train, X_val=datasets.X_val, y_val=datasets.y_val, **automl_settings)
+    res['endtime'] = str(datetime.datetime.now())
     print("... done running FLAML.")
 
     res['best_estimator'] = pipe.best_estimator
@@ -168,7 +176,11 @@ def do_flaml(runname, config, datasets):
     if output_preds:
         _preds_test_fn = 'out/{}-flaml-preds.csv'.format(runname)
         res['preds_test_filename'] = _preds_test_fn
-        _df_test = pd.concat([datasets.X_test, datasets.y_test, pd.DataFrame(_preds_test, columns=['y_preds'])], axis=1)
+        _preds_df = pd.DataFrame(_preds_test, columns=['y_preds'])
+        cols = datasets.X_test.columns.tolist() + ['y_test',  'y_pred']
+        _df_test = pd.concat([datasets.X_test.reset_index(drop=True),
+            datasets.y_test.reset_index(drop=True), _preds_df.reset_index(drop=True)], axis=1, ignore_index=True)
+        _df_test.columns = cols
         _df_test.to_csv(_preds_test_fn, index=False)
 
     return datasets, res
@@ -204,8 +216,9 @@ def read_and_split(fn, target_col, index_col=None, drop_cols=[]):
     for drop_col in drop_cols:
         _df = _df[_df.columns.drop(list(_df.filter(regex=drop_col)))]
 
-    # For safety; FLAML doens't like these kinds of chars in column names
-    _df.columns.str.replace("[(),:)]", "_", regex=True)
+    # For safety: FLAML doens't like these kinds of chars in column names
+    _df.columns = _df.columns.str.replace("[(),:)]", "_", regex=True)
+
     _X = _df.drop([target_col], axis=1)
     _y = _df[target_col]
     return _X, _y
@@ -220,14 +233,14 @@ def read_and_split_all(train_fn, val_fn, test_fn, target_col, index_col=None, dr
 
     if test_fn is not None:
         print("Reading test file...")
-        X_test, y_test = read_and_split(test_fn, target_col, index_col)
+        X_test, y_test = read_and_split(test_fn, target_col, index_col, drop_cols)
     else:
         print("Creating test data from training...")
         X_train, X_test, y_train, y_test = train_test_split(X_train, y_train, test_size=0.1, random_state=1)
 
     if val_fn is not None:
         print("Reading val file...")
-        X_val, y_val = read_and_split(val_fn, target_col, index_col)
+        X_val, y_val = read_and_split(val_fn, target_col, index_col, drop_cols)
     else:
         print("Creating val data from training data...")
         X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.1, random_state=1)
@@ -250,7 +263,7 @@ def main():
     # This structure will hold all the results and will be dumped to disk.
     results = {}
     results['runname'] = runname
-    results['time'] = str(datetime.datetime.now())
+    results['starttime'] = str(datetime.datetime.now())
     results['hostname'] = socket.gethostname()
 
     # Read the settings file
@@ -264,10 +277,10 @@ def main():
     test_fn    = config.get('test_filename', None)
     index_col  = config.get('index_col', None)
     target_col = config.get('target_col', None)
-    drop_cols  = config.get('drop_cols', None)
+    drop_cols  = config.get('drop_cols', [])
 
     # Make DataSets
-    datasets = read_and_split_all(train_fn, val_fn, test_fn, target_col, index_col )
+    datasets = read_and_split_all(train_fn, val_fn, test_fn, target_col, index_col, drop_cols)
 
     results['X_train_shape'] = datasets.X_train.shape
     results['y_train_shape'] = datasets.y_train.shape
@@ -277,14 +290,6 @@ def main():
     results['y_test_shape'] = datasets.y_test.shape
     results['X_train_columns'] = datasets.X_train.columns.tolist()
 
-
-    # Define our Target
-    #target_col = 'Will_Downgrade'
-    #df[target_col]=(df['downgrade_within3m']>0)
-    # Drop columns that don't make sense: leakage, IDs, etc.
-    #drop_list=(['My_UID', 'YYYYMM', 'downgrade', 'upgrade', 'downgrade_within3m', 'upgrade_within3m', 'log_diff'])
-    #df = df.drop(drop_list, axis=1)
-
     datasets, results['lr'] = do_lr(runname, config, datasets)
     dump_results(runname, results)
 
@@ -292,8 +297,10 @@ def main():
     dump_results(runname, results)
 
     #results['autosklearn'] = do_autosklearn(config, features_train, y_train, features_test, y_test)
-    dump_results(runname, results)
 
+    results['endtime'] = str(datetime.datetime.now())
+
+    dump_results(runname, results)
     print("Run name: {}".format(runname))
 
 
