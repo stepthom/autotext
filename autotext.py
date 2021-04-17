@@ -93,7 +93,10 @@ def do_lr(runname, config, datasets):
     scaler = StandardScaler()
     scaler = scaler.fit(datasets.X_train)
     _X_train = scaler.transform(datasets.X_train)
-    _X_val = scaler.transform(datasets.X_val)
+
+    _X_val = None
+    if (datasets.X_val is not None):
+        _X_val = scaler.transform(datasets.X_val)
     _X_test = scaler.transform(datasets.X_test)
 
     pipe = LogisticRegressionCV(cv=5,
@@ -111,8 +114,9 @@ def do_lr(runname, config, datasets):
     _preds_train = pipe.predict(_X_train)
     res['metrics_train'] = get_metrics(datasets.y_train, _preds_train)
 
-    _preds_val = pipe.predict(_X_val)
-    res['metrics_val'] = get_metrics(datasets.y_val, _preds_val)
+    if (_X_val is not None):
+        _preds_val = pipe.predict(_X_val)
+        res['metrics_val'] = get_metrics(datasets.y_val, _preds_val)
 
     _preds_test = pipe.predict(_X_test)
     if datasets.y_test is not None:
@@ -153,7 +157,7 @@ def do_flaml(runname, config, datasets):
 
     print("Running FLAML with {} jobs for {} seconds...".format(jobs, time))
     res['starttime'] = str(datetime.datetime.now())
-    pipe.fit(datasets.X_train, datasets.y_train, X_val=datasets.X_val, y_val=datasets.y_val, **automl_settings)
+    pipe.fit(datasets.X_train, datasets.y_train, X_val=datasets.X_test, y_val=datasets.y_test, **automl_settings)
     res['endtime'] = str(datetime.datetime.now())
     print("... done running FLAML.")
 
@@ -165,8 +169,9 @@ def do_flaml(runname, config, datasets):
     _preds_train = pipe.predict(datasets.X_train)
     res['metrics_train'] = get_metrics(datasets.y_train, _preds_train)
 
-    _preds_val = pipe.predict(datasets.X_val)
-    res['metrics_val'] = get_metrics(datasets.y_val, _preds_val)
+    if (datasets.X_val is not None) and (datasets.y_val is not None):
+        _preds_val = pipe.predict(datasets.X_val)
+        res['metrics_val'] = get_metrics(datasets.y_val, _preds_val)
 
     _preds_test = pipe.predict(datasets.X_test)
     if datasets.y_test is not None:
@@ -220,11 +225,13 @@ def read_and_split(fn, target_col, index_col=None, drop_cols=[]):
     _df.columns = _df.columns.str.replace("[(),:)]", "_", regex=True)
 
     _X = _df.drop([target_col], axis=1)
-    _y = _df[target_col]
+    _y = None
+    if target_col in _df:
+        _y = _df[target_col]
     return _X, _y
 
 
-def read_and_split_all(train_fn, val_fn, test_fn, target_col, index_col=None, drop_cols=[]):
+def read_and_split_all(train_fn, val_fn, test_fn, target_col, index_col=None, drop_cols=[], combine_train_and_val=False):
     if not train_fn:
         raise ValueError('train_fn cannot be null.')
 
@@ -244,6 +251,13 @@ def read_and_split_all(train_fn, val_fn, test_fn, target_col, index_col=None, dr
     else:
         print("Creating val data from training data...")
         X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.1, random_state=1)
+
+    if combine_train_and_val:
+        print("Combining train and val datasets...")
+        X_train = X_train.append(X_val)
+        y_train = y_train.append(y_val)
+        X_val = None
+        y_val = None
 
     return DataSets(train_fn, val_fn, test_fn,
              X_train, y_train,
@@ -278,14 +292,16 @@ def main():
     index_col  = config.get('index_col', None)
     target_col = config.get('target_col', None)
     drop_cols  = config.get('drop_cols', [])
+    combine_train_and_val  = config.get('combine_train_and_val', False)
 
     # Make DataSets
-    datasets = read_and_split_all(train_fn, val_fn, test_fn, target_col, index_col, drop_cols)
+    datasets = read_and_split_all(train_fn, val_fn, test_fn, target_col, index_col, drop_cols, combine_train_and_val)
 
     results['X_train_shape'] = datasets.X_train.shape
     results['y_train_shape'] = datasets.y_train.shape
-    results['X_val_shape'] = datasets.X_val.shape
-    results['y_val_shape'] = datasets.y_val.shape
+    if datasets.X_val is not None:
+        results['X_val_shape'] = datasets.X_val.shape
+        results['y_val_shape'] = datasets.y_val.shape
     results['X_test_shape'] = datasets.X_test.shape
     results['y_test_shape'] = datasets.y_test.shape
     results['X_train_columns'] = datasets.X_train.columns.tolist()

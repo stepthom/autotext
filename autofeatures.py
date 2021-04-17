@@ -21,6 +21,8 @@ from datetime import datetime
 
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+from empath import Empath
+
 
 class TextTransformer():
     def __init__(self,
@@ -34,6 +36,7 @@ class TextTransformer():
                  sublinear_tf=False,
                  get_lexical=True,
                  get_sentiment=True,
+                 get_empath=True,
                  decomposition_type=None,
                  n_components=None):
 
@@ -58,8 +61,10 @@ class TextTransformer():
 
         self.get_lexical = get_lexical
         self.get_sentiment = get_sentiment
+        self.get_empath = get_empath
 
         self.analyzer = SentimentIntensityAnalyzer()
+        self.empath = Empath()
 
     def fit(self, X, y=None):
         self.vectorizer = self.vectorizer.fit(X)
@@ -93,6 +98,12 @@ class TextTransformer():
         if self.get_sentiment:
             f['sent_compound'] = X.apply(
                 lambda x: self.analyzer.polarity_scores(x)['compound'])
+
+        if self.get_empath:
+            _tmp =  X.apply(lambda x: self.empath.analyze(x, normalize=True))
+            _tmp = pd.json_normalize(_tmp)
+            for col in _tmp.columns:
+                f['empath_{}'.format(col)] = _tmp[col]
 
         if y is not None:
             f['label'] = y
