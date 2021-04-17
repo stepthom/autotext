@@ -318,13 +318,22 @@ def main():
     results['y_test_shape'] = datasets.y_test.shape
     results['X_train_columns'] = datasets.X_train.columns.tolist()
 
-    datasets, results['lr'] = do_lr(runname, config, datasets)
-    dump_results(runname, results)
 
-    datasets, results['flaml'] = do_flaml(runname, config, datasets)
-    dump_results(runname, results)
+    _do_lr = config.get('do_lr', False)
+    _do_flaml = config.get('do_flaml', True)
+    _do_autosklearn = config.get('do_autosklearn', False)
 
-    #results['autosklearn'] = do_autosklearn(config, features_train, y_train, features_test, y_test)
+    if _do_lr:
+        datasets, results['lr'] = do_lr(runname, config, datasets)
+        dump_results(runname, results)
+
+    if _do_flaml:
+        datasets, results['flaml'] = do_flaml(runname, config, datasets)
+        dump_results(runname, results)
+
+    if _do_autosklearn:
+        results['autosklearn'] = do_autosklearn(config, features_train, y_train, features_test, y_test)
+        dump_results(runname, results)
 
     results['endtime'] = str(datetime.datetime.now())
 
