@@ -24,6 +24,8 @@ import ConfigSpace.read_and_write.json as config_json
 
 import datetime
 
+import jsonpickle
+
 
 def get_metrics(y_true, y_pred):
     res = {}
@@ -41,13 +43,11 @@ scorer = autosklearn.metrics.make_scorer(
 )
 
 
-def do_autosklearn(config, features_train, y_train, ffeatures_test, y_test):
+def do_autosklearn(runname, config, datasets):
     res = {}
 
     time = config.get('time_left_for_this_task', 100)
     jobs = config.get('n_jobs', 1)
-
-    print("Running autosklearn for {} seconds on {} jobs...".format(time, jobs))
 
     pipe = autosklearn.classification.AutoSklearnClassifier(
         time_left_for_this_task=time,
@@ -55,37 +55,42 @@ def do_autosklearn(config, features_train, y_train, ffeatures_test, y_test):
         n_jobs=jobs,
         seed=42,
         memory_limit=9072,
-        exclude_estimators=config['exclude_estimators'],
+        exclude_estimators=[
+            "k_nearest_neighbors",
+            "mlp",
+            "gaussian_nb",
+            "bernoulli_nb",
+            "multinomial_nb",
+            "decision_tree",
+            "lda",
+            "liblinear_svc",
+            "libsvm_svc",
+            "qda"]
     )
 
-    pipe = pipe.fit(features_train, y_train)
 
+    print("Running autosklearn for {} seconds on {} jobs...".format(time, jobs))
+    res['starttime'] = str(datetime.datetime.now())
+    pipe = pipe.fit(datasets.X_train, datasets.y_train )
+    res['endtime'] = str(datetime.datetime.now())
     print("... done fitting autosklearn.")
 
-    y_pred = pipe.predict(features_val)
-    res['val_metrics'] = get_metrics(y_val, y_pred)
+    res['show_models'] = jsonpickle.encode(pipe.show_models(), unpicklable=False, keys=True)
+    res['stats'] = jsonpickle.encode(pipe.sprint_statistics(), unpicklable=False, keys=True)
+    res['params'] = jsonpickle.encode(pipe.get_params(), unpicklable=False, keys=True)
+    #res['models'] = jsonpickle.encode(pipe.get_models_with_weights(), unpicklable=False, keys=True)
+    #res['cv_results'] = pipe.cv_results_
 
-    if features_test is not None:
-        y_pred_test = pipe.predict(features_test)
-        #features_test['pred'] = y_pred_test
-        #features_test.to_csv('out/{}-test_pred.csv'.format(), index=False)
-        if y_test is not None:
-            res['test_metrics'] = get_metrics(
-                y_test, y_pred_test)
-            print('Test results:')
-            print(classification_report(y_test, y_pred_test))
+    _preds_train = pipe.predict(datasets.X_train)
+    res['metrics_train'] = get_metrics(datasets.y_train, _preds_train)
 
-    cv = pipe.cv_results_
-    cv_df = pd.DataFrame.from_dict(cv)
-    #cv_df.to_csv('out/{}-cv.csv'.format(runname), index=False)
-    res['cv_results'] = {}
-    for index, row in cv_df.iterrows():
-        res['cv_results'][index] = {}
-        res['cv_results'][index]['mean_test_score'] = row['mean_test_score']
-        res['cv_results'][index]['mean_fit_time'] = row['mean_fit_time']
-        res['cv_results'][index]['rank_test_scores'] = row['rank_test_scores']
-        res['cv_results'][index]['status'] = row['status']
-        res['cv_results'][index]['params'] = row['params']
+    if (datasets.X_val is not None) and (datasets.y_val is not None):
+        _preds_val = pipe.predict(datasets.X_val)
+        res['metrics_val'] = get_metrics(datasets.y_val, _preds_val)
+
+    _preds_test = pipe.predict(datasets.X_test)
+    if datasets.y_test is not None:
+        res['metrics_test'] = get_metrics(datasets.y_test, _preds_test)
 
     return res
 
@@ -140,6 +145,19 @@ def do_lr(runname, config, datasets):
     return datasets, res
 
 
+def custom_metric(X_test, y_test, estimator, labels, X_train, y_train,
+                  weight_test=None, weight_train=None):
+    from sklearn.metrics import f1_score
+    y_pred = estimator.predict(X_test)
+    test_loss = 1.0-f1_score(y_test, y_pred, labels=labels,
+                         sample_weight=weight_test, average='macro')
+    y_pred = estimator.predict(X_train)
+    train_loss = 1.0-f1_score(y_train, y_pred, labels=labels,
+                          sample_weight=weight_train, average='macro')
+    alpha = 0.1
+    return test_loss * (1 + alpha) - alpha * train_loss, [test_loss, train_loss]
+
+
 def do_flaml(runname, config, datasets):
     res = {}
     time = config.get('time_left_for_this_task', 100)
@@ -148,7 +166,7 @@ def do_flaml(runname, config, datasets):
     pipe = AutoML()
     automl_settings = {
         "time_budget": time,  # in seconds
-        "metric": 'f1',
+        "metric": custom_metric,
         "task": 'classififcation',
         "log_file_name": "out/flaml-{}.log".format(runname),
         "n_jobs": jobs,
@@ -156,6 +174,7 @@ def do_flaml(runname, config, datasets):
         "model_history": True,
     }
 
+    #res['automl_settings'] = jsonpickle.encode(automl_settings, unpicklable=False, keys=True)
     res['automl_settings'] = automl_settings
 
     print("Running FLAML with {} jobs for {} seconds...".format(jobs, time))
@@ -196,8 +215,15 @@ def do_flaml(runname, config, datasets):
 
 
 def dump_results(runname, results):
+
+    def dumper(obj):
+        try:
+            return obj.toJSON()
+        except:
+            return obj.__dict__
+
     with open('out/{}-results.json'.format(runname), 'w') as fp:
-        json.dump(results, fp, indent=4)
+        json.dump(results, fp, default=dumper, indent=4)
 
 
 class DataSets:
@@ -332,7 +358,7 @@ def main():
         dump_results(runname, results)
 
     if _do_autosklearn:
-        results['autosklearn'] = do_autosklearn(config, features_train, y_train, features_test, y_test)
+        results['autosklearn'] = do_autosklearn(runname, config, datasets)
         dump_results(runname, results)
 
     results['endtime'] = str(datetime.datetime.now())
