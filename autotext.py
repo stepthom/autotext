@@ -78,8 +78,6 @@ def do_autosklearn(runname, config, datasets):
     res['show_models'] = jsonpickle.encode(pipe.show_models(), unpicklable=False, keys=True)
     res['stats'] = jsonpickle.encode(pipe.sprint_statistics(), unpicklable=False, keys=True)
     res['params'] = jsonpickle.encode(pipe.get_params(), unpicklable=False, keys=True)
-    #res['models'] = jsonpickle.encode(pipe.get_models_with_weights(), unpicklable=False, keys=True)
-    #res['cv_results'] = pipe.cv_results_
 
     _preds_train = pipe.predict(datasets.X_train)
     res['metrics_train'] = get_metrics(datasets.y_train, _preds_train)
@@ -166,7 +164,7 @@ def do_flaml(runname, config, datasets):
     pipe = AutoML()
     automl_settings = {
         "time_budget": time,  # in seconds
-        "metric": custom_metric,
+        "metric": 'f1',
         "task": 'classififcation',
         "log_file_name": "out/flaml-{}.log".format(runname),
         "n_jobs": jobs,
@@ -174,8 +172,7 @@ def do_flaml(runname, config, datasets):
         "model_history": True,
     }
 
-    #res['automl_settings'] = jsonpickle.encode(automl_settings, unpicklable=False, keys=True)
-    res['automl_settings'] = automl_settings
+    res['automl_settings'] = jsonpickle.encode(automl_settings, unpicklable=False, keys=True)
 
     print("Running FLAML with {} jobs for {} seconds...".format(jobs, time))
     res['starttime'] = str(datetime.datetime.now())
@@ -223,7 +220,7 @@ def dump_results(runname, results):
             return obj.__dict__
 
     with open('out/{}-results.json'.format(runname), 'w') as fp:
-        json.dump(results, fp, default=dumper, indent=4)
+        json.dump(results, fp, indent=4)
 
 
 class DataSets:
@@ -280,20 +277,26 @@ def read_and_split_all(train_fn, val_fn, test_fn, target_col, index_col=None, dr
         X_train, X_test, y_train, y_test = train_test_split(
             X_train, y_train, test_size=0.1, random_state=1)
 
+    X_val = None
+    y_val = None
     if val_fn is not None:
         print("Reading val file...")
         X_val, y_val = read_and_split(val_fn, target_col, index_col, drop_cols)
     else:
-        print("Creating val data from training data...")
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_train, y_train, test_size=0.1, random_state=1)
+        if not combine_train_and_val:
+            print("Creating val data from training data...")
+            X_train, X_val, y_train, y_val = train_test_split(
+                X_train, y_train, test_size=0.1, random_state=1)
 
     if combine_train_and_val:
-        print("Combining train and val datasets...")
-        X_train = X_train.append(X_val)
-        y_train = y_train.append(y_val)
-        X_val = None
-        y_val = None
+        if X_val is not None and y_val is not None:
+            print("Combining train and val datasets...")
+            X_train = X_train.append(X_val)
+            y_train = y_train.append(y_val)
+            X_val = None
+            y_val = None
+        else:
+            print("No val dataset to combine...")
 
     return DataSets(train_fn, val_fn, test_fn,
                     X_train, y_train,
@@ -342,7 +345,13 @@ def main():
         results['y_val_shape'] = datasets.y_val.shape
     results['X_test_shape'] = datasets.X_test.shape
     results['y_test_shape'] = datasets.y_test.shape
-    results['X_train_columns'] = datasets.X_train.columns.tolist()
+
+    results['X_train_head'] = datasets.X_train.head().to_dict()
+    results['y_train_head'] = datasets.y_train.head().to_dict()
+    results['X_test_head'] = datasets.X_test.head().to_dict()
+    results['y_test_head'] = datasets.y_test.head().to_dict()
+
+    dump_results(runname, results)
 
 
     _do_lr = config.get('do_lr', False)
