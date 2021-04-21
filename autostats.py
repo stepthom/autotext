@@ -45,7 +45,7 @@ def main():
     parser.add_argument(
         "--output_file", help="Path to output results file.", nargs="?", default="out/stats-out.json")
     parser.add_argument(
-        "--drop_cols", help="Columns to drop.", nargs="*")
+        "--drop_cols", help="Columns to drop.", nargs="*", default=[])
     args = parser.parse_args()
 
 
@@ -104,7 +104,9 @@ def main():
     for col_name in [col_name for col_name in X.columns]:
         print("col: {}".format(col_name))
         results[col_name] = {}
+        df[col_name] = df[col_name].replace({True: 1, False: 0})
         results[col_name]['head'] = df[col_name].head().to_dict()
+
 
         def get_numeric_stats(col, tar):
             res = {}
@@ -132,14 +134,15 @@ def main():
             except ValueError:
                 pass
 
-            #results[col_name]['target_corr_pearson'] = stats.pearsonr(
-                #df[col_name].fillna(0), df[args.target_col])
-            #results[col_name]['target_corr_spearman'] = stats.spearmanr(
-                #df[col_name], df[args.target_col], nan_policy="omit")
-            #results[col_name]['target_linregress'] = stats.linregress(
-                #df[col_name].fillna(0), df[args.target_col])
+            results[col_name]['target_corr_pearson'] = stats.pearsonr(
+                df[col_name].fillna(0), df[args.target_col])
+            results[col_name]['target_corr_spearman'] = stats.spearmanr(
+                df[col_name], df[args.target_col], nan_policy="omit")
+            results[col_name]['target_linregress'] = stats.linregress(
+                df[col_name].fillna(0), df[args.target_col])
 
     results['endtime'] = str(datetime.datetime.now())
+
 
     dump_results(args.output_file, results)
 
