@@ -10,18 +10,14 @@ import json
 
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
-import itertools
 import os
 import socket
 
-import sklearn
 from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix, accuracy_score, f1_score, recall_score, precision_score, roc_auc_score
 from sklearn.model_selection import train_test_split
-
-import autosklearn.classification
-from autosklearn.metrics import balanced_accuracy, precision, recall, f1
-import ConfigSpace.read_and_write.json as config_json
+from sklearn.feature_selection import SelectKBest, chi2, mutual_info_classif
+from sklearn.ensemble import ExtraTreesClassifier
 
 import datetime
 
@@ -33,6 +29,22 @@ from scipy import stats
 def dump_results(fname, results):
     with open(fname, 'w') as fp:
         json.dump(results, fp, indent=4)
+
+
+def get_numeric_stats(col):
+    res = {}
+    res = col.describe().to_dict()
+    res['num_na'] = int(col.isna().sum())
+    res['num_nonzero'] = int(col.astype(bool).sum())
+    res['nunique'] = int(col.nunique())
+    cf = stats.relfreq(col, numbins=10)
+    res['relfreq'] = {}
+    bins = [cf.lowerlimit]
+    for i in range(1, 10+1):
+        bins.append(bins[i-1] + cf.binsize)
+    res['relfreq']['bins'] = bins
+    res['relfreq']['frequency'] = cf.frequency.tolist()
+    return res
 
 
 def main():
@@ -48,7 +60,6 @@ def main():
         "--drop_cols", help="Columns to drop.", nargs="*", default=[])
     args = parser.parse_args()
 
-
     # This structure will hold all the results and will be dumped to disk.
     results = {}
     results['starttime'] = str(datetime.datetime.now())
@@ -57,7 +68,7 @@ def main():
     print("Reading data file...")
     df = pd.read_csv(args.data_file)
     results['data_shape'] = df.shape
-    print("Done. Shape = {}".format(df.shape))
+    print("...done. Shape = {}".format(df.shape))
 
     for drop_col in args.drop_cols:
         df = df[df.columns.drop(list(df.filter(regex=drop_col)))]
@@ -77,72 +88,94 @@ def main():
     X = df.drop([args.target_col], axis=1)
     y = df[args.target_col]
 
-    N = 30
-    from sklearn.feature_selection import SelectKBest, chi2, mutual_info_classif
-    s = SelectKBest(k='all')
-    s.fit(X, y)
-    _scores = pd.DataFrame(
-        {'col': X.columns, 'score': s.scores_, 'pvalue': s.pvalues_})
-    results['f_classif'] = _scores.sort_values(
-        ['score'], ascending=False).head(N).to_dict()
-
-    s = SelectKBest(mutual_info_classif, k='all')
-    s.fit(X, y)
-    _scores = pd.DataFrame({'col': X.columns, 'score': s.scores_})
-    results['mutual_info_classif'] = _scores.sort_values(
-        ['score'], ascending=False).head(N).to_dict()
-
-    from sklearn.ensemble import ExtraTreesClassifier
-    clf = ExtraTreesClassifier(n_estimators=50).fit(X, y)
+    print("Running ExtraTrees...")
+    clf = ExtraTreesClassifier(n_estimators=50, random_state=42).fit(X, y)
     _scores = pd.DataFrame(
         {'col': X.columns, 'importance': clf.feature_importances_})
-    results['extra_tree_importances'] = _scores.sort_values(
-        ['importance'], ascending=False).head(N).to_dict()
+    _scores = _scores.sort_values(['importance'], ascending=False)
+    ordered_cols = _scores['col']
+    _scores = _scores.to_dict()
+    results['feature_importances'] = _scores
 
     dump_results(args.output_file, results)
 
-    for col_name in [col_name for col_name in X.columns]:
-        print("col: {}".format(col_name))
-        results[col_name] = {}
+    # Correlation between columns; save for later
+    print("Running Correlations...")
+    corrs_p = df.corr(method='pearson').abs().unstack(
+    ).sort_values(ascending=False).reset_index()
+    corrs_p.columns = ['col1', 'col2', 'corr']
+    corrs_s = df.corr(method='spearman').abs().unstack(
+    ).sort_values(ascending=False).reset_index()
+    corrs_s.columns = ['col1', 'col2', 'corr']
+    corrs_k = df.corr(method='kendall').abs().unstack(
+    ).sort_values(ascending=False).reset_index()
+    corrs_k.columns = ['col1', 'col2', 'corr']
+
+    feats = {}
+
+    # for col_name in [col_name for col_name in ordered_cols]:
+    rank = 0
+    for row_idx, col_name in _scores['col'].items():
+        rank = rank + 1
+        print("row_idx: {}, col_name: {}, rank: {}".format(
+            row_idx, col_name, rank))
+        feats[col_name] = {}
         df[col_name] = df[col_name].replace({True: 1, False: 0})
-        results[col_name]['head'] = df[col_name].head().to_dict()
 
+        # Basic stats
+        feats[col_name]['head'] = df[col_name].head().to_dict()
+        feats[col_name]['5_largest'] = df[col_name].nlargest(5).to_dict()
+        feats[col_name]['5_smallest'] = df[col_name].nsmallest(5).to_dict()
 
-        def get_numeric_stats(col, tar):
-            res = {}
-            res['stats'] = col.describe().to_dict()
-            res['num_na'] = int(col.isna().sum())
-            res['num_nonzero'] = int(col.astype(bool).sum())
-            res['nunique'] = int(col.nunique())
-            res['5_largest'] = col.nlargest(5).to_dict()
-            res['5_smallest'] = col.nsmallest(5).to_dict()
+        if not is_numeric_dtype(df[col_name]):
+            print("Warning: not implemented for non-numeric types.")
+            continue
 
-            return res
+        feats[col_name]['basic_stats'] = get_numeric_stats(df[col_name])
 
-        if is_numeric_dtype(df[col_name]):
-            results[col_name]['all'] = get_numeric_stats(
-                df[col_name], df[args.target_col])
-            for label in results['labels']:
-                _tmp = df[df[args.target_col] == label]
-                results[col_name]['target_{}'.format(label)] = get_numeric_stats(
-                    _tmp[col_name], _tmp[args.target_col])
+        # Column-target statistics
+        ts = {}
+        ts['et_importance'] = _scores['importance'][row_idx]
 
-            try:
-                a = df[col_name][y == results['labels'][0]]
-                b = df[col_name][y == results['labels'][1]]
-                results[col_name]['mannwhitneyu'] = stats.mannwhitneyu(a, b)
-            except ValueError:
-                pass
+        mi = mutual_info_classif(
+            df[col_name].to_numpy().reshape(-1, 1), df[args.target_col])
+        ts['mutual_info'] = mi.tolist()[0]
 
-            results[col_name]['target_corr_pearson'] = stats.pearsonr(
-                df[col_name].fillna(0), df[args.target_col])
-            results[col_name]['target_corr_spearman'] = stats.spearmanr(
-                df[col_name], df[args.target_col], nan_policy="omit")
-            results[col_name]['target_linregress'] = stats.linregress(
-                df[col_name].fillna(0), df[args.target_col])
+        ts['corr_pearson'] = stats.pearsonr(
+            df[col_name].fillna(0), df[args.target_col])
+        ts['corr_spearman'] = stats.spearmanr(
+            df[col_name], df[args.target_col], nan_policy="omit")
+        ts['linregress'] = stats.linregress(
+            df[col_name].fillna(0), df[args.target_col])
+
+        try:
+            a = df[col_name][y == results['labels'][0]]
+            b = df[col_name][y == results['labels'][1]]
+            ts['mannwhitneyu'] = stats.mannwhitneyu(a, b)
+        except ValueError:
+            pass
+
+        for label in results['labels']:
+            _tmp = df[df[args.target_col] == label]
+            ts['target_{}_stats'.format(label)] = get_numeric_stats(
+                _tmp[col_name])
+
+        feats[col_name]['target_stats'] = ts
+
+        # Column-column statistics
+        cs = {}
+        cs['pearson'] = corrs_p.loc[corrs_p['col1'] ==
+                                    col_name][['col2', 'corr']].head(10).to_dict()
+        cs['kendall'] = corrs_k.loc[corrs_k['col1'] ==
+                                    col_name][['col2', 'corr']].head(10).to_dict()
+        cs['spearman'] = corrs_s.loc[corrs_s['col1'] ==
+                                     col_name][['col2', 'corr']].head(10).to_dict()
+
+        feats[col_name]['column_correlations'] = cs
+
+    results['features'] = feats
 
     results['endtime'] = str(datetime.datetime.now())
-
 
     dump_results(args.output_file, results)
 
