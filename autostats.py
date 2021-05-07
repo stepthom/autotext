@@ -1,5 +1,4 @@
 from sklearn.linear_model import LogisticRegressionCV
-from flaml import AutoML
 from sklearn.preprocessing import StandardScaler
 import uuid
 import sys
@@ -21,8 +20,6 @@ from sklearn.ensemble import ExtraTreesClassifier
 
 import datetime
 
-import jsonpickle
-
 from scipy import stats
 
 
@@ -31,12 +28,21 @@ def dump_results(fname, results):
         json.dump(results, fp, indent=4)
 
 
+def get_categorical_stats(col):
+    res = {}
+    res['num_na'] = int(col.isna().sum())
+    res['num_nonzero'] = int(col.astype(bool).sum())
+    res['nunique'] = int(col.nunique())
+    res['value_counts'] = col.value_counts().to_dict()
+    res['value_counts_norm'] = col.value_counts(normalize=True).to_dict()
+    return res
+
 def get_numeric_stats(col):
     res = {}
     res = col.describe().to_dict()
     res['num_na'] = int(col.isna().sum())
-    res['num_nonzero'] = int(col.astype(bool).sum())
     res['nunique'] = int(col.nunique())
+    res['num_nonzero'] = int(col.astype(bool).sum())
     cf = stats.relfreq(col, numbins=10)
     res['relfreq'] = {}
     bins = [cf.lowerlimit]
@@ -58,13 +64,17 @@ def main():
         "--output_file", help="Path to output results file.", nargs="?", default="out/stats-out.json")
     parser.add_argument(
         "--drop_cols", help="Columns to drop.", nargs="*", default=[])
+    parser.add_argument(
+        "--skip_scores", help="Don't run ExtraTreesClassifier to compute feature importances.", action="store_true")
+    parser.add_argument(
+        "--target-only", help="Just compute stats on the target feature.", action="store_true")
     args = parser.parse_args()
 
     # This structure will hold all the results and will be dumped to disk.
     results = {}
     results['starttime'] = str(datetime.datetime.now())
     results['hostname'] = socket.gethostname()
-
+    results['data_file'] = args.data_file 
     print("Reading data file...")
     df = pd.read_csv(args.data_file)
     results['data_shape'] = df.shape
@@ -83,19 +93,42 @@ def main():
     df = df.dropna(axis=0, how='any')
     results['data_shape_after_dropna'] = df.shape
 
-    results['labels'] = df[args.target_col].unique().tolist()
-
     X = df.drop([args.target_col], axis=1)
     y = df[args.target_col]
 
-    print("Running ExtraTrees...")
-    clf = ExtraTreesClassifier(n_estimators=50, random_state=42).fit(X, y)
-    _scores = pd.DataFrame(
-        {'col': X.columns, 'importance': clf.feature_importances_})
-    _scores = _scores.sort_values(['importance'], ascending=False)
-    ordered_cols = _scores['col']
-    _scores = _scores.to_dict()
-    results['feature_importances'] = _scores
+    dtype_counts = {}
+    dtypes = {}
+    for col in X.columns:
+        dtype_counts[X[col].dtypes.name] = dtype_counts.get(X[col].dtypes.name, 0) + 1
+        dtypes[col] = X[col].dtypes.name
+
+    results['dtypes'] = dtypes
+    results['dtype_counts'] = dtype_counts
+
+    target = {}
+    target['name'] = args.target_col
+    target['dtype'] = y.dtypes.name
+    target['labels'] = df[args.target_col].unique().tolist()
+    target['categorical_stats'] = get_categorical_stats(y)
+
+    results['target'] = target
+
+
+    dump_results(args.output_file, results)
+
+    if args.target_only:
+        return 
+
+    _scores = []
+    if not args.skip_scores:
+        print("Running ExtraTrees...")
+        clf = ExtraTreesClassifier(n_estimators=50, random_state=42).fit(X, y)
+        _scores = pd.DataFrame(
+            {'col': X.columns, 'importance': clf.feature_importances_})
+        _scores = _scores.sort_values(['importance'], ascending=False)
+        ordered_cols = _scores['col']
+        _scores = _scores.to_dict()
+        results['feature_importances'] = _scores
 
     dump_results(args.output_file, results)
 
@@ -113,29 +146,31 @@ def main():
 
     feats = {}
 
-    # for col_name in [col_name for col_name in ordered_cols]:
     rank = 0
-    for row_idx, col_name in _scores['col'].items():
+    #for row_idx, col_name in _scores['col'].items():
+    for col_name in [col_name for col_name in X]:
         rank = rank + 1
-        print("row_idx: {}, col_name: {}, rank: {}".format(
-            row_idx, col_name, rank))
+        print("col_name: {}, rank: {}".format(
+            col_name, rank))
         feats[col_name] = {}
         df[col_name] = df[col_name].replace({True: 1, False: 0})
 
         # Basic stats
         feats[col_name]['head'] = df[col_name].head().to_dict()
-        feats[col_name]['5_largest'] = df[col_name].nlargest(5).to_dict()
-        feats[col_name]['5_smallest'] = df[col_name].nsmallest(5).to_dict()
 
         if not is_numeric_dtype(df[col_name]):
+            feats[col_name]['categorical_stats'] = get_categorical_stats(df[col_name])
             print("Warning: not implemented for non-numeric types.")
             continue
 
+        feats[col_name]['5_largest'] = df[col_name].nlargest(5).to_dict()
+        feats[col_name]['5_smallest'] = df[col_name].nsmallest(5).to_dict()
         feats[col_name]['basic_stats'] = get_numeric_stats(df[col_name])
 
         # Column-target statistics
         ts = {}
-        ts['et_importance'] = _scores['importance'][row_idx]
+        if not args.skip_scores:
+            ts['et_importance'] = _scores['importance'][row_idx]
 
         mi = mutual_info_classif(
             df[col_name].to_numpy().reshape(-1, 1), df[args.target_col])
