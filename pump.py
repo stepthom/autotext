@@ -1,4 +1,3 @@
-from sklearn.linear_model import LogisticRegressionCV
 from flaml import AutoML
 import uuid
 import sys
@@ -22,7 +21,7 @@ from sklearn.decomposition import KernelPCA, PCA, TruncatedSVD
 import category_encoders as ce
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import cross_val_score
-from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 import lightgbm as lgb
 from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix, accuracy_score, f1_score, recall_score, precision_score, roc_auc_score
@@ -33,8 +32,6 @@ from sklearn.impute import SimpleImputer
 import category_encoders as ce
 from category_encoders.wrapper import PolynomialWrapper
 
-
-from category_encoders.wrapper import PolynomialWrapper
 
 import ConfigSpace.read_and_write.json as config_json
 
@@ -125,6 +122,7 @@ def custom_metric2(X_test, y_test, estimator, labels, X_train, y_train,
     return test_loss * (1 + alpha) - alpha * train_loss, [test_loss, train_loss]
 
 
+
 def add_indicator(X, col, missing_val, replace_val=np.nan):
     col_new = "{}_missing".format(col)
     X[col_new] = X[col].apply(lambda x: 1 if x == missing_val else 0)
@@ -166,6 +164,14 @@ def keep_only(X, column, keep_list, replace_val='__OTHER__'):
 def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep_top=10):
 
     df = X.copy()
+    
+    ##################################################
+    # Dropping - Won't need at all
+    ##################################################
+    drop_cols = ['id', 'scheme_name', 'recorded_by']
+    dup_cols = ['payment_type', 'quantity_group', 'source_type', 'waterpoint_type_group']
+    drop_cols = drop_cols + dup_cols
+    df = df.drop(drop_cols, axis=1)
 
     ##################################################
     # Change Types
@@ -239,18 +245,20 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     df[cat_cols] = df[cat_cols].astype('category')
 
     # Encoding
-    if train:
-        enc.fit(df[cat_cols], y)
-    df[cat_cols] = enc.transform(df[cat_cols])
-    df[cat_cols] = df[cat_cols].astype('category')
+    #cat_cols = ['funder']
+    if enc is not None:
+        if train:
+            enc.fit(df[cat_cols], y)
+        _new_cols = enc.transform(df[cat_cols])
+        if not isinstance(_new_cols, pd.DataFrame):
+            _new_cols = pd.DataFrame(_new_cols, columns=["{}_{}".format(c, i) for i in range(_new_cols.shape[1])])
+        df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
+        df = df.drop(cat_cols, axis=1)
 
     ##################################################
-    # Dropping
+    # Dropping - don't need anymore
     ##################################################
-    drop_cols = ['id', 'date_recorded', 'recorded_by']
-    drop_cols = drop_cols + [ 'scheme_name']
-    dup_cols = ['payment_type', 'quantity_group', 'source_type', 'waterpoint_type_group']
-    drop_cols = drop_cols + dup_cols
+    drop_cols = ['date_recorded']
     df = df.drop(drop_cols, axis=1)
 
     return df
@@ -258,10 +266,16 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
 
 def main():
 
-    #parser = argparse.ArgumentParser()
-    #parser.add_argument(
-        #"settings_file", help="Path to JSON settings/config file.")
-    #args = parser.parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--encoder", help="Name of encoder to use? None, ordinal, mestimate, backward", default="None")
+
+    parser.add_argument(
+        "--keep-top", help="Number of levels in cat features to keep.", nargs='?', type=int, const=1, default=10)
+    
+    parser.add_argument(
+        "--search-type", help="FLAML or randomCV?", default=10)
+    args = parser.parse_args()
     runname = str(uuid.uuid4())
 
     print("Run name: {}".format(runname))
@@ -278,62 +292,62 @@ def main():
     Xo = dfo.drop('status_group', axis=1)
     y = dfo['status_group']
 
-    imputer = SimpleImputer(missing_values=np.nan, strategy="median")   
-    enc = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)
+    imputer = SimpleImputer(missing_values=np.nan, strategy="median")
+    
+    enc = None
+    if args.encoder == "ordinal":
+        enc = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32)
+    elif args.encoder == "mestimate":
+        enc = ce.wrapper.PolynomialWrapper(ce.m_estimate.MEstimateEncoder(randomized=True, verbose=2))
+    elif args.encoder == "backward":
+        enc = ce.backward_difference.BackwardDifferenceEncoder(handle_unknown='value', return_df=True)
+        
     top_n_values = {}
     X = hack(Xo, y, imputer, top_n_values, enc, train=True, keep_top=10)
     
-    if (False):
+    pipe = None
+    if args.search_type == "randomCV":
+        
+        from scipy.stats import uniform, randint
 
         params = {
-         #'colsample_bytree': 0.8031986460435498,
-         #'learning_rate': 0.13913418814669692,
-         #'max_bin': 128,
-         #'min_child_samples': 38,
-         #'n_estimators': 74,
-         'n_jobs': 4,
-         #'num_leaves': 16,
-         'objective': 'multiclass',
-         #'reg_alpha': 0.0030439446132180708,
-         #'reg_lambda': 0.2510232453366158,
-         'subsample': 1.0}
+         'n_jobs': 4,}
         clf = lgb.LGBMClassifier(**params)
 
-        pipe1 = Pipeline(steps=[('preprocessor', pre1),
-                                ('clf', clf)])
 
         param_grid = {
-            #'clf__colsample_bytree': [0.6, 0.7, 0.80, 0.9, 1],
-            #'clf__max_depth': [-1, 10, 20, 30],
-            #'preprocessor__ct__cat__encoder__randomized': [True, False],
-            'clf__max_bin': [8, 16, 32, 64],
-            'clf__num_leaves': [48, 64, 84, 128],
-            #'clf__path_smooth': [0, 0.1],
-            'clf__n_estimators': [500, 1000, 1250, 1500],
-            'clf__learning_rate': [0.2, 0.225, 0.25, 0.275, 0.30, 0.325],
-            'clf__class_weight':['balanced'],
+            'colsample_bytree': uniform(0.6, 0.4),
+            'max_depth': randint(5, 30),
+            'max_bin': randint(8, 128),
+            'num_leaves': randint(16, 512),
+            'path_smooth': uniform(0.0, 0.2),
+            'n_estimators': randint(25, 1000),
+            'min_child_samples': randint(5, 100),
+            'learning_rate': uniform(0.001, 0.9),
+            'subsample': uniform(0.5, 0.5),
+            'reg_alpha': uniform(0.0, 1.0),
+            'reg_lambda': uniform(0.0, 1.0),
+            'class_weight':['balanced', None],
         }
 
-
-        search = GridSearchCV(pipe1, param_grid, n_jobs=20, cv=3, scoring='accuracy', return_train_score=True, verbose=2)
+        pipe = RandomizedSearchCV(clf, param_grid, n_iter=2000, n_jobs=10, cv=3, scoring='accuracy', return_train_score=True, verbose=10)
 
         print("Running GridSearchCV")
-        search.fit(X, y)
+        pipe.fit(X, y)
 
-        results['cv_results_'] = search.cv_results_
-        tbl = cv_results_to_df(search.cv_results_)
-        print(tbl)
-        tbl.to_csv("out/tbl_{}.csv".format(runname), index=False)
+        results['cv_results_'] = pipe.cv_results_
+        tbl = cv_results_to_df(pipe.cv_results_)
+        tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
                                   
 
-    if True:
+    elif args.search_type == "flaml":
         
         pipe = AutoML()
         automl_settings = {
-            "time_budget": 60,
+            "time_budget": 12000,
             "task": 'classififcation',
             "log_file_name": "out/flaml-{}.log".format(runname),
-            "n_jobs": 20,
+            "n_jobs": 10,
             "estimator_list": ['lgbm', 'xgboost', 'rf', 'extra_tree'],
             "model_history": True,
             "eval_method": "cv",
@@ -359,21 +373,18 @@ def main():
         print(results['best_loss'])
         #print(results['metrics_test'])
         
+    if pipe is not None:
         #test_df = pd.read_csv('https://drive.google.com/uc?export=download&id=1Qnrd0pIRHJNoqNXNEDfp4YJglF4mRL_6')
         test_df = pd.read_csv('data/pump_test.csv', parse_dates=['date_recorded'])
-        _test = hack(test_df, None, imputer, top_n_values, enc, train=True, keep_top=10)
-        
-        
+        _test = hack(test_df, None, imputer, top_n_values, enc, train=False, keep_top=10)        
+
         preds = pipe.predict(_test)
         submission = pd.DataFrame(data={'id': test_df['id'], 'status_group': preds})
         submission.to_csv("out/{}-stepthom_submission.csv".format(runname), index=False)
         
-
-
     results['endtime'] = str(datetime.datetime.now())
     dump_results(runname, results)
     
-
     print("Run name: {}".format(runname))
 
 
