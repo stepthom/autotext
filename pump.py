@@ -39,6 +39,8 @@ import datetime
 
 import jsonpickle
 
+import geopy.distance
+
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
@@ -183,13 +185,13 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     ##################################################
 
     # TODO: replace with nan (so it will be imputed later?
-    df = add_indicator(df, 'construction_year', 0, replace_val=1950)
+    df = add_indicator(df, 'construction_year', 0)
     
     # TODO: replace with something else?
     df = add_indicator(df, 'amount_tsh', 0)
 
     # TODO: replace with region means?
-    df = add_indicator(df, 'population', 0)
+    #df = add_indicator(df, 'population', 0)
     df = add_indicator(df, 'latitude', 0)
     df = add_indicator(df, 'longitude', 0)
     df = add_indicator(df, 'gps_height', 0)
@@ -200,7 +202,7 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     # Impute Missing Value
     numeric_features = ['amount_tsh', 'gps_height', 
                         'longitude', 'latitude', 'num_private',
-                        'population']
+                        'population', 'construction_year']
 
     if train:
         imputer = imputer.fit(df[numeric_features], y)
@@ -216,6 +218,12 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     df['date_recorded_since'] = (baseline - df['date_recorded']).dt.days
 
     df['timediff'] = df['year_date_recorded'] - df['construction_year']
+    
+    ##################################################
+    # Lat/Long
+    ##################################################
+    # dodoma = (-6.173056, 35.741944)
+    df['dodoma_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.distance((-6.173056, 35.741944), (x[0], x[1])).km, axis=1)
 
 
     ##################################################
@@ -231,13 +239,15 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     df['public_meeting'] = df['public_meeting'].astype('str')
     df['permit'] = df['permit'].astype('str')
 
-    # Convert np.nan and "none" to "__NAN__"
+    # Convert np.nan and "none"/"nan" to special string "__NAN__"
     df['wpt_name'] = df['wpt_name'].replace("none", '__NAN__')
+    df['public_meeting'] = df['public_meeting'].replace("nan", '__NAN__')
+    df['permit'] = df['permit'].replace("nan", '__NAN__')
     df[cat_cols] = df[cat_cols].fillna('__NAN__')
     
     
     # Categorical levels "smushing" - convert long-tail values to "__OTHER__"
-    for c in ['wpt_name', 'funder', 'extraction_type', 'installer']:
+    for c in ['wpt_name', 'funder', 'extraction_type', 'installer', 'subvillage', 'lga', 'ward']:
         if train:
             top_n_values[c] = get_top_n_values(df, c, n=keep_top)
         df = keep_only(df, c, top_n_values[c])
@@ -251,9 +261,11 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
             enc.fit(df[cat_cols], y)
         _new_cols = enc.transform(df[cat_cols])
         if not isinstance(_new_cols, pd.DataFrame):
-            _new_cols = pd.DataFrame(_new_cols, columns=["{}_{}".format(c, i) for i in range(_new_cols.shape[1])])
+            _new_cols = pd.DataFrame(_new_cols, columns=["{}_{}".format('enc', i) for i in range(_new_cols.shape[1])])
         df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
         df = df.drop(cat_cols, axis=1)
+    #else:
+    #    df[cat_cols] = df[cat_cols].apply(lambda x: x.cat.codes)
 
     ##################################################
     # Dropping - don't need anymore
@@ -268,13 +280,21 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--encoder", help="Name of encoder to use? None, ordinal, mestimate, backward", default="None")
+        "--encoder", help="Name of encoder to use? None, ordinal, mestimate, backward, hashing", default="None")
 
     parser.add_argument(
-        "--keep-top", help="Number of levels in cat features to keep.", nargs='?', type=int, const=1, default=10)
+        "--keep-top", help="Number of levels in cat features to keep.", nargs='?', type=int, const=1, default=20)
     
     parser.add_argument(
-        "--search-type", help="FLAML or randomCV?", default=10)
+        "--enc-dim", help="For hashing encoder, number of dimentions.", nargs='?', type=int, const=1, default=8)
+    
+    parser.add_argument(
+        "--search-type", help="FLAML or randomCV?", default="flaml")
+    
+    parser.add_argument(
+        "--search-time", help="FLAML time budget", default=1200)
+        
+        
     args = parser.parse_args()
     runname = str(uuid.uuid4())
 
@@ -285,12 +305,18 @@ def main():
     results['runname'] = runname
     results['starttime'] = str(datetime.datetime.now())
     results['hostname'] = socket.gethostname()
+    results['encoder'] = args.encoder
+    results['keep_top'] = args.keep_top
+    results['enc_dim'] = args.enc_dim
+    results['search_type'] = args.search_type
+    results['search_time'] = args.search_time
 
     #df = pd.read_csv("https://drive.google.com/uc?export=download&id=1O3gYw1FlsbDYrXhma5_N6AYqQ3OKI3uh", parse_dates=['date_recorded'])
     dfo = pd.read_csv("data/pump_train.csv", parse_dates=['date_recorded'])
 
     Xo = dfo.drop('status_group', axis=1)
     y = dfo['status_group']
+
 
     imputer = SimpleImputer(missing_values=np.nan, strategy="median")
     
@@ -301,9 +327,31 @@ def main():
         enc = ce.wrapper.PolynomialWrapper(ce.m_estimate.MEstimateEncoder(randomized=True, verbose=2))
     elif args.encoder == "backward":
         enc = ce.backward_difference.BackwardDifferenceEncoder(handle_unknown='value', return_df=True)
+    elif args.encoder == "hashing":
+        enc = ce.hashing.HashingEncoder(return_df = True, n_components=args.enc_dim)
+    elif args.encoder == "None":
+        enc = None
+    else:
+        print("Error: undefined encoder: {}".format(args.encoder))
+        exit()
         
     top_n_values = {}
-    X = hack(Xo, y, imputer, top_n_values, enc, train=True, keep_top=10)
+    X = hack(Xo, y, imputer, top_n_values, enc, train=True, keep_top=args.keep_top)
+    
+    results['X_head'] = X.head().to_dict()
+    
+    #test_df = pd.read_csv('https://drive.google.com/uc?export=download&id=1Qnrd0pIRHJNoqNXNEDfp4YJglF4mRL_6', parse_dates=['date_recorded'])
+    test_df = pd.read_csv('data/pump_test.csv', parse_dates=['date_recorded'])
+    _test = hack(test_df, None, imputer, top_n_values, enc, train=False, keep_top=args.keep_top)   
+    
+    results['_test_head'] = _test.head().to_dict()
+    
+    #print(X[['funder', 'installer', 'wpt_name', 'basin', 'subvillage', 'region', 'lga', 'ward', 'public_meeting']].head(20))
+    #print(X[['enc_0', 'enc_1', 'enc_2', 'enc_3', 'enc_4', 'enc_5', 'enc_6', 'enc_7', 'enc_8', 'enc_9']].head(20))
+    #print(X.head(20))
+    #X.to_csv('out/X.csv', index=False)
+    #_test.to_csv('out/_test.csv', index=False)
+    #quit()
     
     pipe = None
     if args.search_type == "randomCV":
@@ -330,7 +378,7 @@ def main():
             'class_weight':['balanced', None],
         }
 
-        pipe = RandomizedSearchCV(clf, param_grid, n_iter=2000, n_jobs=10, cv=3, scoring='accuracy', return_train_score=True, verbose=10)
+        pipe = RandomizedSearchCV(clf, param_grid, n_iter=1000, n_jobs=10, cv=3, scoring='accuracy', return_train_score=True, verbose=10)
 
         print("Running GridSearchCV")
         pipe.fit(X, y)
@@ -344,7 +392,7 @@ def main():
         
         pipe = AutoML()
         automl_settings = {
-            "time_budget": 12000,
+            "time_budget": args.search_time,
             "task": 'classififcation',
             "log_file_name": "out/flaml-{}.log".format(runname),
             "n_jobs": 10,
@@ -374,9 +422,7 @@ def main():
         #print(results['metrics_test'])
         
     if pipe is not None:
-        #test_df = pd.read_csv('https://drive.google.com/uc?export=download&id=1Qnrd0pIRHJNoqNXNEDfp4YJglF4mRL_6')
-        test_df = pd.read_csv('data/pump_test.csv', parse_dates=['date_recorded'])
-        _test = hack(test_df, None, imputer, top_n_values, enc, train=False, keep_top=10)        
+     
 
         preds = pipe.predict(_test)
         submission = pd.DataFrame(data={'id': test_df['id'], 'status_group': preds})
