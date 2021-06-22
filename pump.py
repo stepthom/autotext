@@ -170,8 +170,8 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     ##################################################
     # Dropping - Won't need at all
     ##################################################
-    drop_cols = ['id', 'scheme_name', 'recorded_by']
-    dup_cols = ['payment_type', 'quantity_group', 'source_type', 'waterpoint_type_group']
+    drop_cols = ['id', 'num_private']
+    dup_cols = [] # ['payment_type', 'quantity_group', 'source_type', 'waterpoint_type_group']
     drop_cols = drop_cols + dup_cols
     df = df.drop(drop_cols, axis=1)
 
@@ -185,23 +185,24 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     ##################################################
 
     # TODO: replace with nan (so it will be imputed later?
-    df = add_indicator(df, 'construction_year', 0)
+    df = add_indicator(df, 'construction_year', 0, 1950)
     
     # TODO: replace with something else?
     df = add_indicator(df, 'amount_tsh', 0)
 
     # TODO: replace with region means?
-    #df = add_indicator(df, 'population', 0)
-    df = add_indicator(df, 'latitude', 0)
+    df = add_indicator(df, 'population', 0)
+    df = add_indicator(df, 'latitude', -2e-08)
     df = add_indicator(df, 'longitude', 0)
     df = add_indicator(df, 'gps_height', 0)
 
     ##################################################
     # Impute missing numeric values
     ##################################################
+    print("DEBUG: hack: imputing")
     # Impute Missing Value
     numeric_features = ['amount_tsh', 'gps_height', 
-                        'longitude', 'latitude', 'num_private',
+                        'longitude', 'latitude', 
                         'population', 'construction_year']
 
     if train:
@@ -212,6 +213,7 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     ##################################################
     # Date/Time
     ##################################################
+    print("DEBUG: hack: date/time")
     df = add_datetime(df, 'date_recorded')
 
     baseline = pd.datetime(2014, 1, 1)
@@ -222,13 +224,21 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     ##################################################
     # Lat/Long
     ##################################################
-    # dodoma = (-6.173056, 35.741944)
-    df['dodoma_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.distance((-6.173056, 35.741944), (x[0], x[1])).km, axis=1)
+    print("DEBUG: hack: lat long")
+    daressalaam = (-6.8, 39.283333)
+    mwanza = (-2.516667, 32.9)
+    arusha = (-3.366667, 36.683333)
+    dodoma = (-6.173056, 35.741944)
+    df['daressallam_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(daressalaam, (x[0], x[1])).km, axis=1)
+    df['mwanza_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(mwanza, (x[0], x[1])).km, axis=1)
+    df['arusha_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(arusha, (x[0], x[1])).km, axis=1)
+    df['dodoma_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(dodoma, (x[0], x[1])).km, axis=1)
 
 
     ##################################################
     # Categorical
     ##################################################
+    print("DEBUG: hack: categorical")
     cat_cols = []
     for c in df.columns:
         col_type = df[c].dtype
@@ -255,8 +265,15 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     df[cat_cols] = df[cat_cols].astype('category')
 
     # Encoding
-    #cat_cols = ['funder']
-    if enc is not None:
+    if enc is None:
+        print("DEBUG: hack: encoding: raw")
+        # Do nothing - leave them "raw"
+        pass
+    elif isinstance(enc, str) and enc=="codes":
+        print("DEBUG: hack: encoding: codes")
+        df[cat_cols] = df[cat_cols].apply(lambda x: x.cat.codes)
+    else:
+        print("DEBUG: hack: encoding: encoder")
         if train:
             enc.fit(df[cat_cols], y)
         _new_cols = enc.transform(df[cat_cols])
@@ -264,8 +281,7 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
             _new_cols = pd.DataFrame(_new_cols, columns=["{}_{}".format('enc', i) for i in range(_new_cols.shape[1])])
         df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
         df = df.drop(cat_cols, axis=1)
-    #else:
-    #    df[cat_cols] = df[cat_cols].apply(lambda x: x.cat.codes)
+        
 
     ##################################################
     # Dropping - don't need anymore
@@ -280,7 +296,7 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--encoder", help="Name of encoder to use? None, ordinal, mestimate, backward, hashing", default="None")
+        "--encoder", help="Name of encoder to use? None, ordinal, mestimate, backward, glm, hashing, codes", default="None")
 
     parser.add_argument(
         "--keep-top", help="Number of levels in cat features to keep.", nargs='?', type=int, const=1, default=20)
@@ -289,10 +305,13 @@ def main():
         "--enc-dim", help="For hashing encoder, number of dimentions.", nargs='?', type=int, const=1, default=8)
     
     parser.add_argument(
-        "--search-type", help="FLAML or randomCV?", default="flaml")
+        "--search-type", help="FLAML, RF, randomCV?", default="flaml")
     
     parser.add_argument(
-        "--search-time", help="FLAML time budget", default=1200)
+        "--search-time", help="FLAML time budget", default=1200, type=int)
+    
+    parser.add_argument(
+        "--search-iters", help="randomizedCV iterations", default=100, type=int)
         
         
     args = parser.parse_args()
@@ -310,6 +329,7 @@ def main():
     results['enc_dim'] = args.enc_dim
     results['search_type'] = args.search_type
     results['search_time'] = args.search_time
+    results['search_iters'] = args.search_iters
 
     #df = pd.read_csv("https://drive.google.com/uc?export=download&id=1O3gYw1FlsbDYrXhma5_N6AYqQ3OKI3uh", parse_dates=['date_recorded'])
     dfo = pd.read_csv("data/pump_train.csv", parse_dates=['date_recorded'])
@@ -324,13 +344,17 @@ def main():
     if args.encoder == "ordinal":
         enc = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32)
     elif args.encoder == "mestimate":
-        enc = ce.wrapper.PolynomialWrapper(ce.m_estimate.MEstimateEncoder(randomized=True, verbose=2))
+        enc = ce.wrapper.PolynomialWrapper(ce.m_estimate.MEstimateEncoder(randomized=False, verbose=0))
+    elif args.encoder == "glm":
+        enc = ce.wrapper.PolynomialWrapper(ce.glmm.GLMMEncoder(return_df=True))
     elif args.encoder == "backward":
         enc = ce.backward_difference.BackwardDifferenceEncoder(handle_unknown='value', return_df=True)
     elif args.encoder == "hashing":
         enc = ce.hashing.HashingEncoder(return_df = True, n_components=args.enc_dim)
     elif args.encoder == "None":
         enc = None
+    elif args.encoder == "codes":
+        enc = "codes"
     else:
         print("Error: undefined encoder: {}".format(args.encoder))
         exit()
@@ -345,13 +369,6 @@ def main():
     _test = hack(test_df, None, imputer, top_n_values, enc, train=False, keep_top=args.keep_top)   
     
     results['_test_head'] = _test.head().to_dict()
-    
-    #print(X[['funder', 'installer', 'wpt_name', 'basin', 'subvillage', 'region', 'lga', 'ward', 'public_meeting']].head(20))
-    #print(X[['enc_0', 'enc_1', 'enc_2', 'enc_3', 'enc_4', 'enc_5', 'enc_6', 'enc_7', 'enc_8', 'enc_9']].head(20))
-    #print(X.head(20))
-    #X.to_csv('out/X.csv', index=False)
-    #_test.to_csv('out/_test.csv', index=False)
-    #quit()
     
     pipe = None
     if args.search_type == "randomCV":
@@ -378,10 +395,40 @@ def main():
             'class_weight':['balanced', None],
         }
 
-        pipe = RandomizedSearchCV(clf, param_grid, n_iter=1000, n_jobs=10, cv=3, scoring='accuracy', return_train_score=True, verbose=10)
-
-        print("Running GridSearchCV")
+        pipe = RandomizedSearchCV(clf, param_grid, n_iter=args.search_iters, n_jobs=10, cv=3, scoring='accuracy', return_train_score=True, verbose=10)
         pipe.fit(X, y)
+
+        results['cv_results_'] = pipe.cv_results_
+        tbl = cv_results_to_df(pipe.cv_results_)
+        tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
+        
+    if args.search_type == "RF":
+        
+        from scipy.stats import uniform, randint
+
+        clf = RandomForestClassifier(n_jobs=-1, bootstrap=True, n_estimators=1000)
+
+        param_grid = {
+            #'n_estimators': randint(150, 500),
+            #'n_estimators': randint(4, 1500),
+            'max_features': uniform(0.1, 0.9),
+            #'min_samples_leaf': randint(1,5),
+            #'max_depth': randint(10, 75),
+            #'ccp_alpha': uniform(0.0, 0.02),
+            'criterion':['gini', 'entropy'],
+            'class_weight':['balanced', 'balanced_subsample', None],
+        }
+
+        pipe = RandomizedSearchCV(clf, param_grid, n_iter=args.search_iters, n_jobs=10, cv=2, scoring='accuracy', return_train_score=True, verbose=1)
+        pipe.fit(X, y)
+        
+        fe = pd.DataFrame({'feature':X.columns, 'importance': pipe.best_estimator_.feature_importances_})
+        results['feature_importances_'] = fe.sort_values('importance', ascending=False).to_dict()
+        results['oob_score_'] = pipe.best_estimator_.oob_score_
+        #results['oob_decision_function_'] = pipe.best_estimator_.oob_decision_function_
+        
+        results['max_depths'] = [tree.tree_.max_depth for tree in pipe.best_estimator_.estimators_]  
+        results['node_counts'] = [tree.tree_.node_count for tree in pipe.best_estimator_.estimators_]  
 
         results['cv_results_'] = pipe.cv_results_
         tbl = cv_results_to_df(pipe.cv_results_)
@@ -395,11 +442,11 @@ def main():
             "time_budget": args.search_time,
             "task": 'classififcation',
             "log_file_name": "out/flaml-{}.log".format(runname),
-            "n_jobs": 10,
+            "n_jobs": 20,
             "estimator_list": ['lgbm', 'xgboost', 'rf', 'extra_tree'],
             "model_history": True,
             "eval_method": "cv",
-            "n_splits": 5,
+            "n_splits": 3,
             "metric": 'accuracy',
             #"metric": custom_metric,
             "log_training_metric": True,
