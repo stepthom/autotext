@@ -21,10 +21,11 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
-def add_indicator(X, col, missing_val, replace_val=np.nan):
+def add_indicator(X, col, missing_vals=[], replace_val=np.nan):
     col_new = "{}_missing".format(col)
-    X[col_new] = X[col].apply(lambda x: 1 if x == missing_val else 0)
-    X[col] = X[col].replace(missing_val, replace_val)
+    X[col_new] = X[col].apply(lambda x: 1 if x in missing_vals else 0)
+    for missing_val in missing_vals:
+        X[col] = X[col].replace(missing_val, replace_val)
     return X
 
 def add_datetime(X, column):
@@ -57,9 +58,7 @@ def keep_only(X, column, keep_list, replace_val='__OTHER__'):
     X.loc[~X[column].isin(keep_list), column] = replace_val
     return X
 
-
-
-def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep_top=10):
+def hack(X, y=None, imputer=None, top_n_values=None, enc=None, val_by_regions=None, train=False, keep_top=10):
 
     df = X.copy()
     
@@ -67,8 +66,8 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     # Dropping - Won't need at all
     ##################################################
     # Note: need to leave ID, for downstream tasks
-    drop_cols = ['num_private']
-    dup_cols = [] # ['payment_type', 'quantity_group', 'source_type', 'waterpoint_type_group']
+    drop_cols = ['recorded_by', 'num_private', 'scheme_name']
+    dup_cols = ['payment_type', 'quantity_group', 'source_type', 'waterpoint_type_group']
     drop_cols = drop_cols + dup_cols
     df = df.drop(drop_cols, axis=1)
 
@@ -76,31 +75,69 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
     # Change Types
     ##################################################
     df['construction_year']= pd.to_numeric(df['construction_year'])
+    df['public_meeting'] = df['public_meeting'].astype('str')
+    df['permit'] = df['permit'].astype('str')
 
     ##################################################
     # Add missing value indicators
     ##################################################
-
-    # TODO: replace with nan (so it will be imputed later?
-    df = add_indicator(df, 'construction_year', 0, 1950)
+    
+    df = add_indicator(df, 'funder', ['0', np.nan])
+    df = add_indicator(df, 'installer', ['0', np.nan])
+    
+    df = add_indicator(df, 'wpt_name', [np.nan, "none"])
+    df = add_indicator(df, 'public_meeting', [np.nan, "nan"])
+    df = add_indicator(df, 'permit', [np.nan, "nane"])
+    
+    # TODO: replace with nan (so it will be imputed later)?
+    df = add_indicator(df, 'construction_year', [0], 1950)
     
     # TODO: replace with something else?
-    df = add_indicator(df, 'amount_tsh', 0)
+    df = add_indicator(df, 'amount_tsh', [0])
 
-    # TODO: replace with region means?
-    df = add_indicator(df, 'population', 0)
-    df = add_indicator(df, 'latitude', -2e-08)
-    df = add_indicator(df, 'longitude', 0)
-    df = add_indicator(df, 'gps_height', 0)
+    df = add_indicator(df, 'population', [0])
+    df = add_indicator(df, 'latitude', [-2e-08])
+    df = add_indicator(df, 'longitude', [0])
+    df = add_indicator(df, 'gps_height', [0])
+    
+    
+    ####################################################
+    # Special Impute: replace with region means
+    ####################################################
+    print("DEBUG: hack: special imputing")
+    # Note: the following only works since we've added indicators and replaced "missing" values with np.nan.
 
+    simpute_cols = ['gps_height', 'population', 'latitude', 'longitude']
+    
+    if train:
+        # During training, need to compute the mean value of this column for each region, save for later
+        for c in simpute_cols:
+            mean_val = df[c].mean(skipna=True)
+            val_by_regions[c] = df.groupby('region_code').agg({c: lambda x: x.mean(skipna=True)}).reset_index().fillna(mean_val)
+
+    # Helper function to replace mean from region if missing
+    def f(row, col, val_by_region):
+        if row["{}_missing".format(col)] == 1:
+            return val_by_region[val_by_region['region_code'] == row['region_code']][col].item()
+        else:
+            return row[col]
+    
+    for c in simpute_cols:
+        df[c] = df.apply(lambda row: f(row, c, val_by_regions[c]), axis=1)
+    
+
+    
     ##################################################
     # Impute missing numeric values
     ##################################################
     print("DEBUG: hack: imputing")
     # Impute Missing Value
-    numeric_features = ['amount_tsh', 'gps_height', 
-                        'longitude', 'latitude', 
-                        'population', 'construction_year']
+    numeric_features = ['amount_tsh', 
+                        #'gps_height', 
+                        #'longitude', 
+                        #'latitude', 
+                        #'population', 
+                        'construction_year']
 
     if train:
         imputer = imputer.fit(df[numeric_features], y)
@@ -142,14 +179,9 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, train=False, keep
         if col_type == 'object' or col_type.name == 'category':
             cat_cols.append(c)
             
-    # Bools to strings
-    df['public_meeting'] = df['public_meeting'].astype('str')
-    df['permit'] = df['permit'].astype('str')
-
+    print("DEBUG: hack: cat_cols = {}".format(cat_cols))
+            
     # Convert np.nan and "none"/"nan" to special string "__NAN__"
-    df['wpt_name'] = df['wpt_name'].replace("none", '__NAN__')
-    df['public_meeting'] = df['public_meeting'].replace("nan", '__NAN__')
-    df['permit'] = df['permit'].replace("nan", '__NAN__')
     df[cat_cols] = df[cat_cols].fillna('__NAN__')
     
     
@@ -246,11 +278,12 @@ def main():
         exit()
         
     top_n_values = {}
+    val_by_regions = {}
     
-    X = hack(dfo.drop(target, axis=1), dfo[target], imputer, top_n_values, enc, train=True, keep_top=args.keep_top)
+    X = hack(dfo.drop(target, axis=1), dfo[target], imputer, top_n_values, enc, val_by_regions, train=True, keep_top=args.keep_top)
     X[target] = dfo[target]
     
-    _test = hack(test_df, None, imputer, top_n_values, enc, train=False, keep_top=args.keep_top)   
+    _test = hack(test_df, None, imputer, top_n_values, enc, val_by_regions, train=False, keep_top=args.keep_top)   
     
     id = "{}_{}_{}".format(args.encoder, args.keep_top, args.enc_dim)
     
