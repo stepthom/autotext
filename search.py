@@ -17,7 +17,13 @@ from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 import lightgbm as lgb
 from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix, accuracy_score, f1_score, recall_score, precision_score, roc_auc_score
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, StackingClassifier
+from sklearn.linear_model import LogisticRegression
+
+from sklearn.experimental import enable_hist_gradient_boosting  # noqa
+from sklearn.ensemble import HistGradientBoostingClassifier
+
+
 
 from scipy.stats import uniform, randint
 
@@ -138,9 +144,22 @@ def main():
     search_iters = config.get('search_iters', 100)
     search_time = config.get('search_time', 100)
     estimator_list = config.get('estimator_list', ['lgbm', 'xgboost', 'rf', 'extra_tree'])
+    drop_cols = config.get('drop_cols', None)
+    
+    if False:
+        drop_cols = ['longitude_missing', 'population_missing', 'mwanza_dist', 'gps_height_missing', 'permit_missing', 
+                  'timediff', 'extraction_type_group_non functional', 'quarter_date_recorded', 'daressallam_dist', 
+                  'extraction_type_class_non functional', 
+                  'year_date_recorded',
+                  'source_class_functional needs repair', 'dayofyear_date_recorded', 'installer_missing', 'quality_group_non functional', 
+                  'extraction_type_group_functional needs repair']
     
     train_df = pd.read_csv(train_fn)
+    if drop_cols is not None:
+        train_df = train_df.drop(drop_cols, axis=1)
+    #train_df = train_df.sample(frac=0.05, random_state=1)
     X_train = train_df.drop([target, id_col], axis=1)
+
     y_train = train_df[target]
     
     results['X_train_head'] = X_train.head().to_dict()
@@ -148,32 +167,38 @@ def main():
     X_test = None
     if test_fn is not None:
         test_df = pd.read_csv(test_fn)
+        if drop_cols is not None:
+            test_df = test_df.drop(drop_cols, axis=1)
         X_test = test_df.drop([id_col], axis=1)
         results['X_test_head'] = X_test.head().to_dict()
     
     pipe = None
-    if search_type == "randomCV":      
+    if search_type == "hist":   
 
-        params = {
-         'n_jobs': 4,}
-        clf = lgb.LGBMClassifier(**params)
+        cat_features=None
+        
+        if True:
+            cat_feature_names= ['enc_0','enc_1','enc_2','enc_3',
+                       'enc_4','enc_5','enc_6','enc_7','enc_8','enc_9','enc_10',
+                       'enc_11','enc_12','enc_13','enc_14','enc_15','enc_16',
+                       'enc_17','enc_18','enc_19','enc_20','enc_21','enc_22']
+            
+            cat_features = []
+            for cat_feature_name in cat_feature_names:
+                cat_features.append(list(X_train.columns).index(cat_feature_name))
+            print("DEBUG: cat_features: {}".format(cat_features))
 
+        clf = HistGradientBoostingClassifier(categorical_features = cat_features, random_state=42)
+        
         param_grid = {
-            'colsample_bytree': uniform(0.6, 0.4),
-            'max_depth': randint(5, 30),
-            'max_bin': randint(8, 128),
-            'num_leaves': randint(16, 512),
-            'path_smooth': uniform(0.0, 0.2),
-            'n_estimators': randint(25, 1000),
-            'min_child_samples': randint(5, 100),
-            'learning_rate': uniform(0.001, 0.9),
-            'subsample': uniform(0.5, 0.5),
-            'reg_alpha': uniform(0.0, 1.0),
-            'reg_lambda': uniform(0.0, 1.0),
-            'class_weight':['balanced', None],
+            'max_iter': randint(500, 1500),
+            'max_leaf_nodes': randint(31, 255),
+            'max_bins': randint(102, 255),
+            'learning_rate': uniform(0.001, 0.05),
+
         }
 
-        pipe = RandomizedSearchCV(clf, param_grid, n_iter=search_iters, n_jobs=10, cv=3, scoring='accuracy', return_train_score=True, verbose=10)
+        pipe = RandomizedSearchCV(clf, param_grid, n_iter=search_iters, n_jobs=10, cv=2, scoring='accuracy', return_train_score=True, verbose=1)
         pipe.fit(X_train, y_train)
 
         results['cv_results_'] = pipe.cv_results_
@@ -207,7 +232,30 @@ def main():
         results['cv_results_'] = pipe.cv_results_
         tbl = cv_results_to_df(pipe.cv_results_)
         tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
-                   
+        
+    elif search_type == "stack":
+        
+        estimators = [
+            ('lgbm1', lgb.LGBMClassifier(colsample_bytree=0.28675389617274555, learning_rate=0.010452067895102068, 
+                                         max_bin=1023, min_child_samples=30, n_estimators=366, n_jobs=3, 
+                                         num_leaves=24644, objective='multiclass', reg_alpha=0.0009765625, 
+                                         reg_lambda=0.5525418150514663, subsample=0.676715616413845)),
+            ('rf1', RandomForestClassifier(n_estimators=2048, max_features=0.210054, criterion="gini", random_state=42, n_jobs=3)),
+            ('hist', HistGradientBoostingClassifier(learning_rate=0.0512380, max_bins=137, max_iter=947, max_leaf_nodes=120, random_state=42)),
+        ]
+        
+        #0.051238087074071514,134,947,120
+       
+        pipe = StackingClassifier(estimators=estimators, final_estimator=LogisticRegression(), cv=10, n_jobs=2)
+        
+        print("DEBUG: cross_val_score")
+        scores = cross_val_score(pipe, X_train, y_train, cv=2, n_jobs=1, verbose=2)
+        
+        print("DEBUG: fit on full")
+        pipe.fit(X_train, y_train)
+                
+        results['scores'] = scores
+        results['mean_scores'] = np.mean(scores)
 
     elif search_type == "flaml":
         

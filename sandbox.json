@@ -1,0 +1,24 @@
+{
+    "filenames": [
+        ["data/hack.csv",
+         "data/unknown_project-2500-[1, 3]-False-None-NMF-200-features_val.csv",
+         "data/unknown_project-2500-[1, 3]-False-None-NMF-200-features_test.csv"]
+
+    ],
+    "target_col": "label",
+
+    "time_left_for_this_task": 6000,
+    "n_jobs": 20,
+    "exclude_estimators": [
+        "k_nearest_neighbors",  
+        "mlp",
+        "gaussian_nb", 
+        "bernoulli_nb", 
+        "multinomial_nb",
+        "decision_tree", 
+        "lda",
+        "liblinear_svc", 
+        "libsvm_svc", 
+        "qda"]
+
+}
