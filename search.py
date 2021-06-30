@@ -1,29 +1,21 @@
-from flaml import AutoML
+
 import uuid
 import sys
 import argparse
 import numpy as np
+import pandas as pd
 
 import json
-
-import pandas as pd
 import socket
-
-from sklearn.model_selection import train_test_split
 import datetime
 
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 import lightgbm as lgb
 from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix, accuracy_score, f1_score, recall_score, precision_score, roc_auc_score
-from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, StackingClassifier
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, StackingClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression
-
-from sklearn.experimental import enable_hist_gradient_boosting  # noqa
-from sklearn.ensemble import HistGradientBoostingClassifier
-
-
 
 from scipy.stats import uniform, randint
 
@@ -118,6 +110,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "settings_file", help="Path to JSON settings/config file.")
+    
+    parser.add_argument('--use-ensemble', dest='use_ensemble', default=False, action='store_true')
+    
     args = parser.parse_args()
         
     runname = str(uuid.uuid4())
@@ -131,9 +126,12 @@ def main():
     results['hostname'] = socket.gethostname()
     
     # Read the settings file
+    print("DEBUG: Reading settings file")
     with open(args.settings_file) as f:
         config = json.load(f)
-
+    
+    results['use_ensemble'] = args.use_ensemble
+    
     results['settings'] = config
     
     train_fn = config.get('train_filename', None)
@@ -154,6 +152,7 @@ def main():
                   'source_class_functional needs repair', 'dayofyear_date_recorded', 'installer_missing', 'quality_group_non functional', 
                   'extraction_type_group_functional needs repair']
     
+    print("DEBUG: Reading training data")
     train_df = pd.read_csv(train_fn)
     if drop_cols is not None:
         train_df = train_df.drop(drop_cols, axis=1)
@@ -166,6 +165,7 @@ def main():
     
     X_test = None
     if test_fn is not None:
+        print("DEBUG: Reading testing data")
         test_df = pd.read_csv(test_fn)
         if drop_cols is not None:
             test_df = test_df.drop(drop_cols, axis=1)
@@ -173,7 +173,16 @@ def main():
         results['X_test_head'] = X_test.head().to_dict()
     
     pipe = None
-    if search_type == "hist":   
+    
+    if search_type == "ak":
+        
+        pipe = ak.StructuredDataClassifier(overwrite=True, max_trials=args.search_iters)  
+   
+        pipe.fit(x=X_train, y=y_train, epochs=10)
+    
+    elif search_type == "hist":
+        from sklearn.experimental import enable_hist_gradient_boosting  # noqa
+        from sklearn.ensemble import HistGradientBoostingClassifier
 
         cat_features=None
         
@@ -205,7 +214,7 @@ def main():
         tbl = cv_results_to_df(pipe.cv_results_)
         tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
         
-    if search_type == "RF":
+    elif search_type == "RF":
         clf = RandomForestClassifier(n_jobs=-1, bootstrap=True, n_estimators=1000)
 
         param_grid = {
@@ -236,6 +245,16 @@ def main():
     elif search_type == "stack":
         
         estimators = [
+            
+            #Best tuned for 75 mestimate
+            #('lgbm1', lgb.LGBMClassifier(colsample_bytree=0.28675389617274555, learning_rate=0.010452067895102068, 
+            #                             max_bin=1023, min_child_samples=30, n_estimators=366, n_jobs=3, 
+            #                             num_leaves=24644, objective='multiclass', reg_alpha=0.0009765625, 
+            #                             reg_lambda=0.5525418150514663, subsample=0.676715616413845)),
+            #('rf1', RandomForestClassifier(n_estimators=2048, max_features=0.210054, criterion="gini", random_state=42, n_jobs=3)),
+            #('hist', HistGradientBoostingClassifier(learning_rate=0.0512380, max_bins=137, max_iter=947, max_leaf_nodes=120, random_state=42)),
+            
+            #Best tuned for 100 mestimate
             ('lgbm1', lgb.LGBMClassifier(colsample_bytree=0.28675389617274555, learning_rate=0.010452067895102068, 
                                          max_bin=1023, min_child_samples=30, n_estimators=366, n_jobs=3, 
                                          num_leaves=24644, objective='multiclass', reg_alpha=0.0009765625, 
@@ -245,19 +264,23 @@ def main():
         ]
         
         #0.051238087074071514,134,947,120
-       
-        pipe = StackingClassifier(estimators=estimators, final_estimator=LogisticRegression(), cv=10, n_jobs=2)
         
-        print("DEBUG: cross_val_score")
+        #fe = LogisticRegression()
+        fe = RandomForestClassifier()
+       
+        pipe = StackingClassifier(estimators=estimators, final_estimator=fe, cv=5, n_jobs=2)
+        
+        #print("DEBUG: cross_val_score")
         scores = cross_val_score(pipe, X_train, y_train, cv=2, n_jobs=1, verbose=2)
+        results['scores'] = scores
+        results['mean_scores'] = np.mean(scores)
         
         print("DEBUG: fit on full")
         pipe.fit(X_train, y_train)
-                
-        results['scores'] = scores
-        results['mean_scores'] = np.mean(scores)
 
     elif search_type == "flaml":
+        
+        from flaml import AutoML
         
         pipe = AutoML()
         automl_settings = {
@@ -273,6 +296,7 @@ def main():
             #"metric": custom_metric,
             "log_training_metric": True,
             "verbose": 1,
+            "ensemble": args.use_ensemble,
         }
 
         results['automl_settings'] = jsonpickle.encode(automl_settings, unpicklable=False, keys=True)
@@ -288,6 +312,25 @@ def main():
         results['best_model'] = '{}'.format(str(pipe.model))
         
         print(results['best_loss'])
+        
+    elif search_type == "autosklearn":
+        
+        import autosklearn.classification
+        
+        automl_settings = {
+            "time_left_for_this_task": search_time,
+            "n_jobs": 20,
+            #"include_estimators": estimator_list,   
+            "memory_limit": 20 * 1024,
+        }
+        
+        pipe = autosklearn.classification.AutoSklearnClassifier(**automl_settings)
+        pipe.fit(X_train, y_train)
+        
+        results['cv_results_'] = pipe.cv_results_
+        #tbl = cv_results_to_df(pipe.cv_results_)
+        #tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
+        
         
     if pipe is not None and X_test is not None:
         preds = pipe.predict(X_test)
