@@ -1,4 +1,3 @@
-
 import uuid
 import sys
 import argparse
@@ -11,6 +10,7 @@ import datetime
 
 from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.model_selection import ShuffleSplit
 import lightgbm as lgb
 from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix, accuracy_score, f1_score, recall_score, precision_score, roc_auc_score
@@ -112,6 +112,8 @@ def main():
         "settings_file", help="Path to JSON settings/config file.")
     
     parser.add_argument('--use-ensemble', dest='use_ensemble', default=False, action='store_true')
+    parser.add_argument('--use-sample', dest='use_sample', default=False, action='store_true')
+    parser.add_argument('-s', '--search-type', nargs='?', default=None)
     
     args = parser.parse_args()
         
@@ -130,19 +132,23 @@ def main():
     with open(args.settings_file) as f:
         config = json.load(f)
     
-    results['use_ensemble'] = args.use_ensemble
-    
-    results['settings'] = config
-    
     train_fn = config.get('train_filename', None)
     test_fn = config.get('test_filename', None)
     target = config.get('target', 'status_group')
     id_col = config.get('id_col', 'id')
-    search_type = config.get('search_type', 'flaml')
+    
+    search_type = args.search_type
+    if search_type is None:
+        search_type = config.get('search_type', 'flaml')
     search_iters = config.get('search_iters', 100)
     search_time = config.get('search_time', 100)
     estimator_list = config.get('estimator_list', ['lgbm', 'xgboost', 'rf', 'extra_tree'])
     drop_cols = config.get('drop_cols', None)
+    
+    results['use_ensemble'] = args.use_ensemble
+    results['use_sample'] = args.use_sample
+    results['search_type'] = search_type
+    results['settings'] = config
     
     if False:
         drop_cols = ['longitude_missing', 'population_missing', 'mwanza_dist', 'gps_height_missing', 'permit_missing', 
@@ -156,9 +162,12 @@ def main():
     train_df = pd.read_csv(train_fn)
     if drop_cols is not None:
         train_df = train_df.drop(drop_cols, axis=1)
-    #train_df = train_df.sample(frac=0.05, random_state=1)
+        
+    if args.use_sample:
+        print("DEBUG: Taking sample")
+        train_df = train_df.sample(frac=0.2, random_state=42)
+        
     X_train = train_df.drop([target, id_col], axis=1)
-
     y_train = train_df[target]
     
     results['X_train_head'] = X_train.head().to_dict()
@@ -174,11 +183,10 @@ def main():
     
     pipe = None
     
-    if search_type == "ak":
-        
-        pipe = ak.StructuredDataClassifier(overwrite=True, max_trials=args.search_iters)  
-   
-        pipe.fit(x=X_train, y=y_train, epochs=10)
+    if search_type == "mljar":
+        from supervised.automl import AutoML # mljar-supervised
+        pipe = AutoML(mode="Compete", eval_metric="accuracy")
+        pipe.fit(X_train, y_train)
     
     elif search_type == "hist":
         from sklearn.experimental import enable_hist_gradient_boosting  # noqa
@@ -242,7 +250,26 @@ def main():
         tbl = cv_results_to_df(pipe.cv_results_)
         tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
         
+    elif search_type == "gpc":
+        from sklearn.gaussian_process import GaussianProcessClassifier
+        from sklearn.model_selection import ShuffleSplit
+        
+        pipe = GaussianProcessClassifier(kernel=None, n_jobs=10, warm_start=True, copy_X_train=False, n_restarts_optimizer=10, random_state=42)
+        
+        print("DEBUG: cross_val_score")
+        cv = ShuffleSplit(5, test_size=0.2, train_size=0.2, random_state=0)
+        scores = cross_val_score(pipe, X_train, y_train, cv=cv, n_jobs=1, verbose=2)
+        results['scores'] = scores
+        results['mean_scores'] = np.mean(scores)
+        print("DEBUG: scores: {}".format(scores))
+        
+        print("DEBUG: fit on full")
+        pipe.fit(X_train, y_train)
+        
+        
     elif search_type == "stack":
+        from sklearn.experimental import enable_hist_gradient_boosting  # noqa
+        from sklearn.ensemble import HistGradientBoostingClassifier
         
         estimators = [
             
@@ -265,15 +292,15 @@ def main():
         
         #0.051238087074071514,134,947,120
         
-        #fe = LogisticRegression()
-        fe = RandomForestClassifier()
+        fe = LogisticRegression()
+        #fe = RandomForestClassifier()
        
         pipe = StackingClassifier(estimators=estimators, final_estimator=fe, cv=5, n_jobs=2)
         
         #print("DEBUG: cross_val_score")
-        scores = cross_val_score(pipe, X_train, y_train, cv=2, n_jobs=1, verbose=2)
-        results['scores'] = scores
-        results['mean_scores'] = np.mean(scores)
+        #scores = cross_val_score(pipe, X_train, y_train, cv=2, n_jobs=1, verbose=2)
+        #results['scores'] = scores
+        #results['mean_scores'] = np.mean(scores)
         
         print("DEBUG: fit on full")
         pipe.fit(X_train, y_train)
@@ -331,11 +358,66 @@ def main():
         #tbl = cv_results_to_df(pipe.cv_results_)
         #tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
         
+    elif search_type == "svm":
+        from sklearn.svm import SVC, LinearSVC
+        from sklearn.pipeline import make_pipeline
+        from sklearn.preprocessing import StandardScaler
+        from scipy.stats import reciprocal, uniform
+        from sklearn.model_selection import ShuffleSplit
+        
+        clf = make_pipeline(StandardScaler(), LinearSVC())
+
+        param_grid = {
+            #"svc__gamma": reciprocal(0.001, 0.1),
+            "linearsvc__C": uniform(1, 5),
+            #"svc__kernel": ['linear', 'poly', 'rbf', 'sigmoid'],
+            #"svc__kernel": ['linear'],
+            "linearsvc__dual": [True, False],
+            "linearsvc__penalty": ['l1', 'l2'],
+            "linearsvc__class_weight": ['balanced', None],
+        }
+
+        cv = ShuffleSplit(2, test_size=0.2, train_size=0.7, random_state=0)
+        pipe = RandomizedSearchCV(clf, param_grid, n_iter=search_iters, n_jobs=3, cv=cv, scoring='accuracy', return_train_score=True, verbose=1)
+        pipe.fit(X_train, y_train)
+        
+        results['cv_results_'] = pipe.cv_results_
+        tbl = cv_results_to_df(pipe.cv_results_)
+        tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
+        
+    elif search_type == "knn":
+        from sklearn.neighbors import KNeighborsClassifier
+        from sklearn.pipeline import make_pipeline, Pipeline
+        from sklearn.preprocessing import StandardScaler
+        from scipy.stats import reciprocal, uniform
+        from sklearn.model_selection import ShuffleSplit
+        
+        clf = Pipeline(steps=[('scaler', StandardScaler()), ('clf', KNeighborsClassifier())])
+
+        param_grid = {
+            "clf__n_neighbors": randint(3, 30),
+            "clf__weights": ['uniform', 'distance'],
+            "clf__p": [1, 2, 3],
+        }
+
+        cv = ShuffleSplit(2, test_size=0.10, train_size=0.20, random_state=0)
+        pipe = RandomizedSearchCV(clf, param_grid, n_iter=search_iters, n_jobs=5, cv=cv, scoring='accuracy', return_train_score=True, verbose=1)
+        pipe.fit(X_train, y_train)
+        
+        results['cv_results_'] = pipe.cv_results_
+        tbl = cv_results_to_df(pipe.cv_results_)
+        tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
         
     if pipe is not None and X_test is not None:
         preds = pipe.predict(X_test)
         submission = pd.DataFrame(data={'id': test_df[id_col], 'status_group': preds})
         submission.to_csv("out/{}-stepthom_submission.csv".format(runname), index=False)
+        
+        probas = pipe.predict_proba(X_test)
+        probas_df = pd.DataFrame(probas, columns=pipe.classes_)
+        probas_df[id_col] = test_df[id_col]
+        probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
+        probas_df.to_csv("out/{}-probas.csv".format(runname), index=False)
         
     results['endtime'] = str(datetime.datetime.now())
     dump_results(runname, results)
