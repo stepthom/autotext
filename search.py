@@ -114,6 +114,8 @@ def main():
     parser.add_argument('--use-ensemble', dest='use_ensemble', default=False, action='store_true')
     parser.add_argument('--use-sample', dest='use_sample', default=False, action='store_true')
     parser.add_argument('-s', '--search-type', nargs='?', default=None)
+    parser.add_argument('-t', '--search-time', nargs='?', type=int, default=None)
+    parser.add_argument('-m', '--mljar-mode', nargs='?', default="Compete")
     
     args = parser.parse_args()
         
@@ -140,14 +142,21 @@ def main():
     search_type = args.search_type
     if search_type is None:
         search_type = config.get('search_type', 'flaml')
+        
     search_iters = config.get('search_iters', 100)
-    search_time = config.get('search_time', 100)
+    
+    search_time = args.search_time
+    if search_time is None:
+        search_time = config.get('search_time', 100)
+        
     estimator_list = config.get('estimator_list', ['lgbm', 'xgboost', 'rf', 'extra_tree'])
     drop_cols = config.get('drop_cols', None)
     
     results['use_ensemble'] = args.use_ensemble
     results['use_sample'] = args.use_sample
     results['search_type'] = search_type
+    results['search_time'] = search_time
+    results['mljar_mode'] = args.mljar_mode
     results['settings'] = config
     
     if False:
@@ -185,8 +194,34 @@ def main():
     
     if search_type == "mljar":
         from supervised.automl import AutoML # mljar-supervised
-        pipe = AutoML(mode="Compete", eval_metric="accuracy")
+        
+        print("DEBUG: mljar mode={}, model_time_limit={}".format(args.mljar_mode, search_time))
+        
+        automl_settings = {
+            "mode": args.mljar_mode,
+            "model_time_limit": search_time,
+            "eval_metric": "accuracy",
+            "golden_features": True,
+            "results_path": "out/{}".format(runname),
+            "n_jobs": 10,
+            "verbose": 1,
+        }
+        
+        pipe = AutoML(**automl_settings)
         pipe.fit(X_train, y_train)
+    
+    elif search_type == "autogluon":
+        from autogluon.tabular import TabularDataset, TabularPredictor
+        
+        _df = X_train.copy()
+        _df[target] = y_train
+        
+        excluded_model_types = ['KNN']
+        pipe = TabularPredictor(label=target, eval_metric="accuracy")
+
+        pipe.fit(_df, time_limit=search_time, presets="best_quality", excluded_model_types=excluded_model_types)
+        
+        print(pipe.fit_summary())
     
     elif search_type == "hist":
         from sklearn.experimental import enable_hist_gradient_boosting  # noqa
@@ -413,11 +448,12 @@ def main():
         submission = pd.DataFrame(data={'id': test_df[id_col], 'status_group': preds})
         submission.to_csv("out/{}-stepthom_submission.csv".format(runname), index=False)
         
-        probas = pipe.predict_proba(X_test)
-        probas_df = pd.DataFrame(probas, columns=pipe.classes_)
-        probas_df[id_col] = test_df[id_col]
-        probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
-        probas_df.to_csv("out/{}-probas.csv".format(runname), index=False)
+        if False and predict_probas:
+            probas = pipe.predict_proba(X_test)
+            probas_df = pd.DataFrame(probas, columns=pipe.classes_)
+            probas_df[id_col] = test_df[id_col]
+            probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
+            probas_df.to_csv("out/{}-probas.csv".format(runname), index=False)
         
     results['endtime'] = str(datetime.datetime.now())
     dump_results(runname, results)

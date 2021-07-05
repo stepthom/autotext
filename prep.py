@@ -58,6 +58,44 @@ def keep_only(X, column, keep_list, replace_val='__OTHER__'):
     X.loc[~X[column].isin(keep_list), column] = replace_val
     return X
 
+# Only does the very basic; leaves more on the table for AutoML packages
+# - Change types
+# - Add np.nan indicators
+def hack_simple(X, y=None):
+    df = X.copy()
+    
+    ##################################################
+    # Change Types
+    ##################################################
+    df['construction_year']= pd.to_numeric(df['construction_year'])
+    df['public_meeting'] = df['public_meeting'].astype('str')
+    df['permit'] = df['permit'].astype('str')
+
+    ##################################################
+    # Add missing value indicators
+    ##################################################
+    
+    df = add_indicator(df, 'funder', ['0', np.nan])
+    df = add_indicator(df, 'installer', ['0', np.nan])
+    
+    df = add_indicator(df, 'wpt_name', [np.nan, "none"])
+    df = add_indicator(df, 'public_meeting', [np.nan, "nan"])
+    df = add_indicator(df, 'permit', [np.nan, "nane"])
+    
+    # TODO: replace with nan (so it will be imputed later)?
+    df = add_indicator(df, 'construction_year', [0], 1950)
+    
+    # TODO: replace with something else?
+    df = add_indicator(df, 'amount_tsh', [0])
+
+    df = add_indicator(df, 'population', [0])
+    df = add_indicator(df, 'latitude', [-2e-08])
+    df = add_indicator(df, 'longitude', [0])
+    df = add_indicator(df, 'gps_height', [0])
+    
+    return df
+    
+
 def hack(X, y=None, imputer=None, top_n_values=None, enc=None, val_by_regions=None, train=False, keep_top=10):
 
     df = X.copy()
@@ -232,9 +270,6 @@ def main():
         "--test-input", help="test file name", default="data/pump_test.csv")
     
     parser.add_argument(
-        "--output_str", help="String to insert into output file name", default="data/pump_test.csv")
-    
-    parser.add_argument(
         "--encoder", help="Name of encoder to use? None, ordinal, mestimate, backward, glm, hashing, codes", default="None")
 
     parser.add_argument(
@@ -243,18 +278,19 @@ def main():
     parser.add_argument(
         "--enc-dim", help="For hashing encoder, number of dimentions.", nargs='?', type=int, const=1, default=8)
     
+    parser.add_argument(
+        "--simple", help="Only do simple preprocessing.", default=False, action='store_true')
+    
     args = parser.parse_args()
 
 
     #dfo = pd.read_csv("https://drive.google.com/uc?export=download&id=1O3gYw1FlsbDYrXhma5_N6AYqQ3OKI3uh", parse_dates=['date_recorded'])
     #test_df = pd.read_csv('https://drive.google.com/uc?export=download&id=1Qnrd0pIRHJNoqNXNEDfp4YJglF4mRL_6', parse_dates=['date_recorded'])
     
-    dfo     = pd.read_csv(args.train_input, parse_dates=['date_recorded'])
+    train_df= pd.read_csv(args.train_input, parse_dates=['date_recorded'])
     test_df = pd.read_csv(args.test_input, parse_dates=['date_recorded'])
     
     target = 'status_group'
-
-    Xo = dfo.drop(target, axis=1)
 
     imputer = SimpleImputer(missing_values=np.nan, strategy="median")
     
@@ -280,25 +316,31 @@ def main():
     top_n_values = {}
     val_by_regions = {}
     
-    X = hack(dfo.drop(target, axis=1), dfo[target], imputer, top_n_values, enc, val_by_regions, train=True, keep_top=args.keep_top)
-    X[target] = dfo[target]
+    X_train = None
+    X_test = None
+    fn_id = None
+    if args.simple:
+        X_train = hack_simple(train_df.drop(target, axis=1), train_df[target])
+        X_test = hack_simple(test_df, None)
+        fn_id = "simple"
+    else:
+        X_train = hack(train_df.drop(target, axis=1), train_df[target], imputer, top_n_values, enc, val_by_regions, train=True, keep_top=args.keep_top)
+        X_test = hack(test_df, None, imputer, top_n_values, enc, val_by_regions, train=False, keep_top=args.keep_top)
+        fn_id = "{}_{}_{}".format(args.encoder, args.keep_top, args.enc_dim)
     
-    _test = hack(test_df, None, imputer, top_n_values, enc, val_by_regions, train=False, keep_top=args.keep_top)   
+    X_train[target] = train_df[target]
     
-    id = "{}_{}_{}".format(args.encoder, args.keep_top, args.enc_dim)
-    
-    def append_string(filename, id):
+    def append_string(filename, fn_id):
         name, ext = os.path.splitext(filename)
-        return "{name}_{id}{ext}".format(name=name, id=id, ext=ext)
+        return "{name}_{fn_id}{ext}".format(name=name, fn_id=fn_id, ext=ext)
    
-    _X_fn = append_string(args.train_input, id)
-    X.to_csv(_X_fn, index=False)
+    fn_train = append_string(args.train_input, fn_id)
+    X_train.to_csv(fn_train, index=False)
+    print("DEBUG: Wrote file {}".format(fn_train))
     
-    _test_fn = append_string(args.test_input, id)
-    _test.to_csv(_test_fn, index=False)
-    
-    print("Wrote files {} and {}.".format(_X_fn, _test_fn))
-
+    fn_test = append_string(args.test_input, fn_id)
+    X_test.to_csv(fn_test, index=False)
+    print("DEBUG: Wrote file {}".format(fn_test))
 
 if __name__ == "__main__":
     main()
