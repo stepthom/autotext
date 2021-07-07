@@ -111,11 +111,12 @@ def main():
     parser.add_argument(
         "settings_file", help="Path to JSON settings/config file.")
     
-    parser.add_argument('--use-ensemble', dest='use_ensemble', default=False, action='store_true')
+    parser.add_argument('--use-ensemble', dest='use_ensemble', default=True, action='store_true')
     parser.add_argument('--use-sample', dest='use_sample', default=False, action='store_true')
     parser.add_argument('-s', '--search-type', nargs='?', default=None)
     parser.add_argument('-t', '--search-time', nargs='?', type=int, default=None)
     parser.add_argument('-m', '--mljar-mode', nargs='?', default="Compete")
+    parser.add_argument('-e', '--eval-metric', nargs='?', default="accuracy")
     
     args = parser.parse_args()
         
@@ -136,7 +137,7 @@ def main():
     
     train_fn = config.get('train_filename', None)
     test_fn = config.get('test_filename', None)
-    target = config.get('target', 'status_group')
+    target = config.get('target_col', 'status_group')
     id_col = config.get('id_col', 'id')
     
     search_type = args.search_type
@@ -157,15 +158,11 @@ def main():
     results['search_type'] = search_type
     results['search_time'] = search_time
     results['mljar_mode'] = args.mljar_mode
+    results['eval_metric'] = args.eval_metric
     results['settings'] = config
     
-    if False:
-        drop_cols = ['longitude_missing', 'population_missing', 'mwanza_dist', 'gps_height_missing', 'permit_missing', 
-                  'timediff', 'extraction_type_group_non functional', 'quarter_date_recorded', 'daressallam_dist', 
-                  'extraction_type_class_non functional', 
-                  'year_date_recorded',
-                  'source_class_functional needs repair', 'dayofyear_date_recorded', 'installer_missing', 'quality_group_non functional', 
-                  'extraction_type_group_functional needs repair']
+    print("DEBUG: Settings:")
+    print(results)
     
     print("DEBUG: Reading training data")
     train_df = pd.read_csv(train_fn)
@@ -179,7 +176,7 @@ def main():
     X_train = train_df.drop([target, id_col], axis=1)
     y_train = train_df[target]
     
-    results['X_train_head'] = X_train.head().to_dict()
+    #results['X_train_head'] = X_train.head().to_dict()
     
     X_test = None
     if test_fn is not None:
@@ -202,7 +199,15 @@ def main():
             "model_time_limit": search_time,
             "eval_metric": "accuracy",
             "golden_features": True,
+            "train_ensemble": True,
+            "stack_models": True,
+            "algorithms": ['Random Forest', 'Extra Trees', 'LightGBM', 'Xgboost', 'CatBoost'],
             "results_path": "out/{}".format(runname),
+            "explain_level": 0,
+            "feature_selection": True,
+            "start_random_models": True,
+            "kmeans_features": False,
+            "max_single_prediction_time": None,
             "n_jobs": 10,
             "verbose": 1,
         }
@@ -216,10 +221,13 @@ def main():
         _df = X_train.copy()
         _df[target] = y_train
         
-        excluded_model_types = ['KNN']
+        #excluded_model_types = ['KNN', 'NN']
+        
+        hp = {'RF':{}, 'GBM':{}, 'CAT':{}, 'XT':{}, 'custom': ['GBMLarge']}
         pipe = TabularPredictor(label=target, eval_metric="accuracy")
-
-        pipe.fit(_df, time_limit=search_time, presets="best_quality", excluded_model_types=excluded_model_types)
+        pipe.fit(_df, time_limit=search_time, presets="best_quality", hyperparameters=hp)
+        
+        #pipe.fit(_df, time_limit=search_time, presets="best_quality", excluded_model_types=excluded_model_types)
         
         print(pipe.fit_summary())
     
@@ -349,12 +357,12 @@ def main():
             "time_budget": search_time,
             "task": 'classification',
             "log_file_name": "out/flaml-{}.log".format(runname),
-            "n_jobs": 20,
+            "n_jobs": 10,
             "estimator_list": estimator_list,
             "model_history": True,
             #"eval_method": "cv",
             #"n_splits": 3,
-            "metric": 'accuracy',
+            "metric": args.eval_metric,
             #"metric": custom_metric,
             "log_training_metric": True,
             "verbose": 1,
@@ -445,12 +453,17 @@ def main():
         
     if pipe is not None and X_test is not None:
         preds = pipe.predict(X_test)
-        submission = pd.DataFrame(data={'id': test_df[id_col], 'status_group': preds})
+        submission = pd.DataFrame(data={'id': test_df[id_col], target: preds})
         submission.to_csv("out/{}-stepthom_submission.csv".format(runname), index=False)
         
-        if False and predict_probas:
+        
+        
+        if callable(getattr(pipe, 'predict_proba')):
             probas = pipe.predict_proba(X_test)
-            probas_df = pd.DataFrame(probas, columns=pipe.classes_)
+            columns = None
+            if hasattr(pipe, 'classes_'):
+                columns = pipe.classes_
+            probas_df = pd.DataFrame(probas, columns=columns)
             probas_df[id_col] = test_df[id_col]
             probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
             probas_df.to_csv("out/{}-probas.csv".format(runname), index=False)

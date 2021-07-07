@@ -1,7 +1,12 @@
 import argparse
 import numpy as np
+import uuid
 
 import os
+import jsonpickle
+import json
+import datetime
+import socket
 
 import pandas as pd
 
@@ -9,8 +14,9 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, FunctionTransformer, OrdinalEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
-from datetime import date, datetime
 from sklearn.decomposition import KernelPCA, PCA, TruncatedSVD
+from sklearn.impute import MissingIndicator
+from pandas.api.types import is_numeric_dtype
 
 import category_encoders as ce
 from category_encoders.wrapper import PolynomialWrapper
@@ -58,47 +64,21 @@ def keep_only(X, column, keep_list, replace_val='__OTHER__'):
     X.loc[~X[column].isin(keep_list), column] = replace_val
     return X
 
-# Only does the very basic; leaves more on the table for AutoML packages
-# - Change types
-# - Add np.nan indicators
-def hack_simple(X, y=None):
-    df = X.copy()
-    
-    ##################################################
-    # Change Types
-    ##################################################
-    df['construction_year']= pd.to_numeric(df['construction_year'])
-    df['public_meeting'] = df['public_meeting'].astype('str')
-    df['permit'] = df['permit'].astype('str')
 
-    ##################################################
-    # Add missing value indicators
-    ##################################################
-    
-    df = add_indicator(df, 'funder', ['0', np.nan])
-    df = add_indicator(df, 'installer', ['0', np.nan])
-    
-    df = add_indicator(df, 'wpt_name', [np.nan, "none"])
-    df = add_indicator(df, 'public_meeting', [np.nan, "nan"])
-    df = add_indicator(df, 'permit', [np.nan, "nane"])
-    
-    # TODO: replace with nan (so it will be imputed later)?
-    df = add_indicator(df, 'construction_year', [0], 1950)
-    
-    # TODO: replace with something else?
-    df = add_indicator(df, 'amount_tsh', [0])
-
-    df = add_indicator(df, 'population', [0])
-    df = add_indicator(df, 'latitude', [-2e-08])
-    df = add_indicator(df, 'longitude', [0])
-    df = add_indicator(df, 'gps_height', [0])
-    
-    return df
-    
-
-def hack(X, y=None, imputer=None, top_n_values=None, enc=None, val_by_regions=None, train=False, keep_top=10):
+def hack(X, y=None, train=False, 
+         target_col="status_group",
+         id_col="id", 
+         num_imputer=None, 
+         num_indicator=None, 
+         top_n_values=None, 
+         enc=None, 
+         val_by_regions=None, 
+         special_impute_cols=[],
+         keep_top=10):
 
     df = X.copy()
+    
+    msgs=[]
     
     ##################################################
     # Dropping - Won't need at all
@@ -107,37 +87,92 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, val_by_regions=No
     drop_cols = ['recorded_by', 'num_private', 'scheme_name']
     dup_cols = ['payment_type', 'quantity_group', 'source_type', 'waterpoint_type_group']
     drop_cols = drop_cols + dup_cols
+    msgs.append('Dropping cols: {}'.format(drop_cols))
     df = df.drop(drop_cols, axis=1)
+    
+    ##################################################
+    # Gather data types
+    ##################################################
+    
+    cat_cols = []
+    num_cols = []
+    for c in df.columns:
+        if c == id_col:
+            continue
+        col_type = df[c].dtype
+        if col_type == 'object' or col_type.name == 'category':
+            cat_cols.append(c)
+        elif is_numeric_dtype(df[c]):
+            num_cols.append(c)
+            
+    #num_cols = df.select_dtypes(include="number")
+            
+    msgs.append('Cat cols: {}'.format(cat_cols))
+    msgs.append('Num cols: {}'.format(num_cols))
+    print("DEBUG: Cat cols: {}".format(cat_cols))
+    print("DEBUG: Num cols: {}".format(num_cols))
+    
 
     ##################################################
     # Change Types
     ##################################################
+    msgs.append('Changing construction_year to numeric')
     df['construction_year']= pd.to_numeric(df['construction_year'])
+    
+    msgs.append('Changing public_meeting to str')
     df['public_meeting'] = df['public_meeting'].astype('str')
+    
+    msgs.append('Changing permit to str')
     df['permit'] = df['permit'].astype('str')
+    
 
+    ##################################################
+    # Weird values to np.nan
+    ##################################################
+    
+    strzero_cols = ['funder', 'installer']
+    msgs.append("strzero_cols: {}".format(strzero_cols))
+    for col in strzero_cols:
+        df[col] = df[col].replace('0', np.nan)
+        
+    none_cols = ['wpt_name']
+    msgs.append("none_cols: {}".format(none_cols))
+    for col in none_cols:
+        df[col] = df[col].replace('none', np.nan)
+        
+    nan_cols = ['public_meeting', 'permit']
+    msgs.append("nan_cols: {}".format(nan_cols))
+    for col in nan_cols:
+        df[col] = df[col].replace('nan', np.nan)
+        
+    zero_cols = ['amount_tsh', 'population', 'longitude', 'gps_height']
+    msgs.append("zero_cols: {}".format(zero_cols))
+    for col in zero_cols:
+        df[col] = df[col].replace(0, np.nan)
+            
+    msgs.append("Round latitude to 5 places") 
+    df['latitude'] = df['latitude'].round(decimals = 5)
+        
+    zero_cols = ['amount_tsh', 'population', 'longitude', 'latitude', 'gps_height']
+    msgs.append("zero_cols: {}".format(zero_cols))
+    for col in zero_cols:
+        df[col] = df[col].replace(0, np.nan)
+                
     ##################################################
     # Add missing value indicators
     ##################################################
     
-    df = add_indicator(df, 'funder', ['0', np.nan])
-    df = add_indicator(df, 'installer', ['0', np.nan])
+    # Must happen before numbers are imputed!
+    if num_indicator is not None:
+        print("DEBUG: hack: missing value indicator for numeric")
+        if train:
+            num_indicator = num_indicator.fit(df[num_cols], y)
     
-    df = add_indicator(df, 'wpt_name', [np.nan, "none"])
-    df = add_indicator(df, 'public_meeting', [np.nan, "nan"])
-    df = add_indicator(df, 'permit', [np.nan, "nane"])
-    
-    # TODO: replace with nan (so it will be imputed later)?
-    df = add_indicator(df, 'construction_year', [0], 1950)
-    
-    # TODO: replace with something else?
-    df = add_indicator(df, 'amount_tsh', [0])
-
-    df = add_indicator(df, 'population', [0])
-    df = add_indicator(df, 'latitude', [-2e-08])
-    df = add_indicator(df, 'longitude', [0])
-    df = add_indicator(df, 'gps_height', [0])
-    
+        _new_cols = num_indicator.transform(df[num_cols])
+        if not isinstance(_new_cols, pd.DataFrame):
+            _new_cols = pd.DataFrame(_new_cols, columns=["missing_{}".format(c) for c in num_cols])
+        df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
+        
     
     ####################################################
     # Special Impute: replace with region means
@@ -145,47 +180,46 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, val_by_regions=No
     print("DEBUG: hack: special imputing")
     # Note: the following only works since we've added indicators and replaced "missing" values with np.nan.
 
-    simpute_cols = ['gps_height', 'population', 'latitude', 'longitude']
-    
+    msgs.append("special_impute_cols: {}".format(special_impute_cols))
+                
     if train:
         # During training, need to compute the mean value of this column for each region, save for later
-        for c in simpute_cols:
+        for c in special_impute_cols:
             mean_val = df[c].mean(skipna=True)
             val_by_regions[c] = df.groupby('region_code').agg({c: lambda x: x.mean(skipna=True)}).reset_index().fillna(mean_val)
 
     # Helper function to replace mean from region if missing
     def f(row, col, val_by_region):
-        if row["{}_missing".format(col)] == 1:
+        if np.isnan(row[col]):
             return val_by_region[val_by_region['region_code'] == row['region_code']][col].item()
         else:
             return row[col]
+        
     
-    for c in simpute_cols:
+    for c in special_impute_cols:
         df[c] = df.apply(lambda row: f(row, c, val_by_regions[c]), axis=1)
     
-
     
     ##################################################
     # Impute missing numeric values
     ##################################################
-    print("DEBUG: hack: imputing")
+    print("DEBUG: hack: simple numeric imputing")
     # Impute Missing Value
-    numeric_features = ['amount_tsh', 
-                        #'gps_height', 
-                        #'longitude', 
-                        #'latitude', 
-                        #'population', 
-                        'construction_year']
+    simple_impute_cols = list(set(num_cols) - set(special_impute_cols)) 
+                
+    msgs.append('Numeric simple imputing for cols: {}'.format(simple_impute_cols))
 
     if train:
-        imputer = imputer.fit(df[numeric_features], y)
-    df[numeric_features] = imputer.transform(df[numeric_features])
+        num_imputer = num_imputer.fit(df[simple_impute_cols], y)
+    df[simple_impute_cols] = num_imputer.transform(df[simple_impute_cols])
 
    
     ##################################################
     # Date/Time
     ##################################################
     print("DEBUG: hack: date/time")
+                
+    msgs.append('Adding date/time features for date_recorded')
     df = add_datetime(df, 'date_recorded')
 
     baseline = pd.datetime(2014, 1, 1)
@@ -197,6 +231,8 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, val_by_regions=No
     # Lat/Long
     ##################################################
     print("DEBUG: hack: lat long")
+    
+    msgs.append('Adding distances for four cities')
     daressalaam = (-6.8, 39.283333)
     mwanza = (-2.516667, 32.9)
     arusha = (-3.366667, 36.683333)
@@ -206,30 +242,36 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, val_by_regions=No
     df['arusha_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(arusha, (x[0], x[1])).km, axis=1)
     df['dodoma_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(dodoma, (x[0], x[1])).km, axis=1)
 
+    
+    ##################################################
+    # Categorical Imputing
+    ##################################################
+                
+    # Impute categorical? 
+    # - If yes, use top value count
+    # - If no, replace nan with special string "__NAN__"
+    print("DEBUG: hack: imputing categorical")
+                
+    # TODO: not implemented yet
+    df[cat_cols] = df[cat_cols].fillna('__NAN__')
+    df[cat_cols] = df[cat_cols].astype('category')
 
     ##################################################
-    # Categorical
+    # Categorical Smushing
     ##################################################
-    print("DEBUG: hack: categorical")
-    cat_cols = []
-    for c in df.columns:
-        col_type = df[c].dtype
-        if col_type == 'object' or col_type.name == 'category':
-            cat_cols.append(c)
-            
-    print("DEBUG: hack: cat_cols = {}".format(cat_cols))
-            
-    # Convert np.nan and "none"/"nan" to special string "__NAN__"
-    df[cat_cols] = df[cat_cols].fillna('__NAN__')
-    
-    
+      
     # Categorical levels "smushing" - convert long-tail values to "__OTHER__"
-    for c in ['wpt_name', 'funder', 'extraction_type', 'installer', 'subvillage', 'lga', 'ward']:
+    df[cat_cols] = df[cat_cols].astype(str)
+    for c in cat_cols:
         if train:
             top_n_values[c] = get_top_n_values(df, c, n=keep_top)
         df = keep_only(df, c, top_n_values[c])
         
     df[cat_cols] = df[cat_cols].astype('category')
+                
+    ##################################################
+    # Categorical Smushing
+    ##################################################
 
     # Encoding
     if enc is None:
@@ -254,93 +296,132 @@ def hack(X, y=None, imputer=None, top_n_values=None, enc=None, val_by_regions=No
     # Dropping - don't need anymore
     ##################################################
     drop_cols = ['date_recorded']
+    msgs.append("Dropping cols: {}".format(drop_cols))
     df = df.drop(drop_cols, axis=1)
 
-    return df
+    return df, msgs
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        print("DEBUG: obj: {}".format(obj))
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+
+def dump_results(runname, results):
+
+    def dumper(obj):
+        try:
+            return obj.toJSON()
+        except:
+            return obj.__dict__
+        
+    with open('data/{}-log.json'.format(runname), 'w') as fp:
+        json.dump(results, fp, indent=4, cls=NumpyEncoder)
 
 
 def main():
 
     parser = argparse.ArgumentParser()
-    
-    parser.add_argument(
-        "--train-input", help="train file name", default="data/pump_train.csv")
-    
-    parser.add_argument(
-        "--test-input", help="test file name", default="data/pump_test.csv")
-    
-    parser.add_argument(
-        "--encoder", help="Name of encoder to use? None, ordinal, mestimate, backward, glm, hashing, codes", default="None")
-
-    parser.add_argument(
-        "--keep-top", help="Number of levels in cat features to keep.", nargs='?', type=int, const=1, default=20)
-    
-    parser.add_argument(
-        "--enc-dim", help="For hashing encoder, number of dimentions.", nargs='?', type=int, const=1, default=8)
-    
-    parser.add_argument(
-        "--simple", help="Only do simple preprocessing.", default=False, action='store_true')
-    
+    parser.add_argument("-t", "--train-input", help="train file name", default="data/pump_train.csv")
+    parser.add_argument("-s", "--test-input", help="test file name", default="data/pump_test.csv")
     args = parser.parse_args()
-
-
-    #dfo = pd.read_csv("https://drive.google.com/uc?export=download&id=1O3gYw1FlsbDYrXhma5_N6AYqQ3OKI3uh", parse_dates=['date_recorded'])
-    #test_df = pd.read_csv('https://drive.google.com/uc?export=download&id=1Qnrd0pIRHJNoqNXNEDfp4YJglF4mRL_6', parse_dates=['date_recorded'])
     
     train_df= pd.read_csv(args.train_input, parse_dates=['date_recorded'])
     test_df = pd.read_csv(args.test_input, parse_dates=['date_recorded'])
     
-    target = 'status_group'
+    target_col = "status_group"
+    id_col = "id" 
+    
+    num_indicators = [
+       None,
+       MissingIndicator(features="all")
+    ]
+    
+    num_imputers = [
+       SimpleImputer(missing_values=np.nan, strategy="median") 
+    ]
 
-    imputer = SimpleImputer(missing_values=np.nan, strategy="median")
     
-    enc = None
-    if args.encoder == "ordinal":
-        enc = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32)
-    elif args.encoder == "mestimate":
-        enc = ce.wrapper.PolynomialWrapper(ce.m_estimate.MEstimateEncoder(randomized=False, verbose=0))
-    elif args.encoder == "glm":
-        enc = ce.wrapper.PolynomialWrapper(ce.glmm.GLMMEncoder(return_df=True))
-    elif args.encoder == "backward":
-        enc = ce.backward_difference.BackwardDifferenceEncoder(handle_unknown='value', return_df=True)
-    elif args.encoder == "hashing":
-        enc = ce.hashing.HashingEncoder(return_df = True, n_components=args.enc_dim)
-    elif args.encoder == "None":
-        enc = None
-    elif args.encoder == "codes":
-        enc = "codes"
-    else:
-        print("Error: undefined encoder: {}".format(args.encoder))
-        exit()
-        
-    top_n_values = {}
-    val_by_regions = {}
+    cat_encoders = [
+        None,
+        OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
+        ce.wrapper.PolynomialWrapper(ce.m_estimate.MEstimateEncoder(randomized=False, verbose=0)),
+        #ce.hashing.HashingEncoder(return_df = True, n_components=args.enc_dim),
+    ]
     
-    X_train = None
-    X_test = None
-    fn_id = None
-    if args.simple:
-        X_train = hack_simple(train_df.drop(target, axis=1), train_df[target])
-        X_test = hack_simple(test_df, None)
-        fn_id = "simple"
-    else:
-        X_train = hack(train_df.drop(target, axis=1), train_df[target], imputer, top_n_values, enc, val_by_regions, train=True, keep_top=args.keep_top)
-        X_test = hack(test_df, None, imputer, top_n_values, enc, val_by_regions, train=False, keep_top=args.keep_top)
-        fn_id = "{}_{}_{}".format(args.encoder, args.keep_top, args.enc_dim)
+    keep_tops = [10, 20, 50, 75, 100, 200]
     
-    X_train[target] = train_df[target]
+    special_impute_colss = [
+        [],
+        ['gps_height', 'population', 'latitude', 'longitude']
+    ]
     
-    def append_string(filename, fn_id):
-        name, ext = os.path.splitext(filename)
-        return "{name}_{fn_id}{ext}".format(name=name, fn_id=fn_id, ext=ext)
-   
-    fn_train = append_string(args.train_input, fn_id)
-    X_train.to_csv(fn_train, index=False)
-    print("DEBUG: Wrote file {}".format(fn_train))
+    for num_indicator in num_indicators:
+        for num_imputer in num_imputers:
+            for cat_encoder in cat_encoders:
+                for keep_top in keep_tops:
+                    for special_impute_cols in special_impute_colss:
+                        
+                            results = {}
+                            data_id = str(uuid.uuid4())
+                            results['data_id'] = data_id
+                            results['starttime'] = str(datetime.datetime.now())
+                            results['hostname'] = socket.gethostname()
+                            results['args'] = vars(args)
+                        
+                            results['num_indicator'] = str(num_indicator)
+                            results['num_imputer'] = str(num_imputer)
+                            results['cat_encoder'] = str(cat_encoder)
+                            results['keep_top'] = keep_top
+                            results['special_impute_cols'] = special_impute_cols
+                            
+                            top_n_values = {}
+                            val_by_regions = {}
+
+                            hack_args = {
+                                "target_col": target_col,
+                                "id_col": id_col,
+                                "num_imputer": num_imputer,
+                                "num_indicator": num_indicator,
+                                "enc": cat_encoder,
+                                "top_n_values": top_n_values,
+                                "val_by_regions": val_by_regions,
+                                "special_impute_cols": special_impute_cols,
+                                "keep_top": keep_top,
+                            } 
     
-    fn_test = append_string(args.test_input, fn_id)
-    X_test.to_csv(fn_test, index=False)
-    print("DEBUG: Wrote file {}".format(fn_test))
+                            X_train, train_msgs = hack(train_df.drop(target_col, axis=1), train_df[target_col], train=True, **hack_args)
+                            X_train[target_col] = train_df[target_col]
+                            results['train_msgs'] = train_msgs
+
+                            X_test, test_msgs = hack(test_df, None, train=False, **hack_args)
+                            results['test_msgs'] = test_msgs
+
+                            results['top_n_values'] = top_n_values
+                            results['val_by_regions'] = {}
+                            for col in val_by_regions:
+                                results['val_by_regions'][col] = val_by_regions[col].to_dict()
+
+                            def append_string(filename, data_id):
+                                name, ext = os.path.splitext(filename)
+                                return "{name}_{fn_id}{ext}".format(name=name, fn_id=data_id, ext=ext)
+
+                            fn_train = append_string(args.train_input, data_id)
+                            X_train.to_csv(fn_train, index=False)
+                            print("DEBUG: Wrote file {}".format(fn_train))
+
+                            fn_test = append_string(args.test_input, data_id)
+                            X_test.to_csv(fn_test, index=False)
+                            print("DEBUG: Wrote file {}".format(fn_test))
+
+                            results['fn_train'] = fn_train
+                            results['fn_test'] = fn_test
+
+                            results['endtime'] = str(datetime.datetime.now())
+                            dump_results(data_id, results)
+                            print("Args: {}".format(hack_args))
+                            print("Data ID: {}".format(data_id))
 
 if __name__ == "__main__":
     main()
