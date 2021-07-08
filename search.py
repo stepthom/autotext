@@ -3,10 +3,13 @@ import sys
 import argparse
 import numpy as np
 import pandas as pd
+import os
 
 import json
 import socket
 import datetime
+
+from random import shuffle
 
 from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
@@ -26,15 +29,7 @@ import jsonpickle
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-
-def get_metrics(y_true, y_pred):
-    res = {}
-    res['accuracy'] = accuracy_score(y_true, y_pred)
-    res['f1'] = f1_score(y_true, y_pred, average="macro")
-    res['recall'] = recall_score(y_true, y_pred, average="macro")
-    res['precision'] = precision_score(y_true, y_pred, average="macro")
-    res['report'] = classification_report(y_true, y_pred, output_dict=True)
-    return res
+from flaml import AutoML
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -42,436 +37,176 @@ class NumpyEncoder(json.JSONEncoder):
             return obj.tolist()
         return json.JSONEncoder.default(self, obj)
 
-def dump_results(runname, results):
+def dump_json(fn, json_obj):
+    # Write json_obj to a file named fn
 
     def dumper(obj):
         try:
             return obj.toJSON()
         except:
             return obj.__dict__
-
-    with open('out/{}-results.json'.format(runname), 'w') as fp:
-        json.dump(results, fp, indent=4, cls=NumpyEncoder)
-
-
-# Helper function to print out the results of hyperparmater tuning in a nice table.
-def cv_results_to_df(cv_results):
-    results = pd.DataFrame(list(cv_results['params']))
-    results['mean_fit_time'] = cv_results['mean_fit_time']
-    results['mean_score_time'] = cv_results['mean_score_time']
-    results['mean_train_score'] = cv_results['mean_train_score']
-    results['std_train_score'] = cv_results['std_train_score']
-    results['mean_test_score'] = cv_results['mean_test_score']
-    results['std_test_score'] = cv_results['std_test_score']
-    results['rank_test_score'] = cv_results['rank_test_score']
-
-    results = results.sort_values(['mean_test_score'], ascending=False)
-    return results
-
-
-def custom_metric(X_test, y_test, estimator, labels, X_train, y_train,
-                  weight_test=None, weight_train=None):
-    from sklearn.metrics import accuracy_score
-    y_pred = estimator.predict(X_test)
-    test_loss = 1.0-accuracy_score(y_test, y_pred, sample_weight=weight_test)
-    y_pred = estimator.predict(X_train)
-    train_loss = 1.0-accuracy_score(y_train, y_pred, sample_weight=weight_train)
-    alpha = 1.1
-    print(test_loss * (1 + alpha) - alpha * train_loss, [test_loss, train_loss])
-    return test_loss * (1 + alpha) - alpha * train_loss, [test_loss, train_loss]
-
-
-def custom_metric1(X_test, y_test, estimator, labels, X_train, y_train,
-                  weight_test=None, weight_train=None):
-    from sklearn.metrics import f1_score
-    y_pred = estimator.predict(X_test)
-    test_loss = 1.0-f1_score(y_test, y_pred, labels=labels,
-                         sample_weight=weight_test, average='macro')
-    y_pred = estimator.predict(X_train)
-    train_loss = 1.0-f1_score(y_train, y_pred, labels=labels,
-                          sample_weight=weight_train, average='macro')
-    alpha = 0.1
-    return test_loss * (1 + alpha) - alpha * train_loss, [test_loss, train_loss]
-
-def custom_metric2(X_test, y_test, estimator, labels, X_train, y_train,
-                  weight_test=None, weight_train=None):
-    from sklearn.metrics import log_loss
-    y_pred = estimator.predict_proba(X_test)
-    test_loss = log_loss(y_test, y_pred, labels=labels,
-                         sample_weight=weight_test)
-    y_pred = estimator.predict_proba(X_train)
-    train_loss = log_loss(y_train, y_pred, labels=labels,
-                          sample_weight=weight_train)
-    alpha = 0.5
-    return test_loss * (1 + alpha) - alpha * train_loss, [test_loss, train_loss]
+        
+    print("DEBUG: Writing json file {}".format(fn))
+    with open(fn, 'w') as fp:
+        json.dump(json_obj, fp, indent=4, cls=NumpyEncoder)
 
 
 def main():    
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "settings_file", help="Path to JSON settings/config file.")
+    #parser.add_argument("settings_file", help="Path to JSON settings/config file.")
     
-    parser.add_argument('--use-ensemble', dest='use_ensemble', default=True, action='store_true')
-    parser.add_argument('--use-sample', dest='use_sample', default=False, action='store_true')
-    parser.add_argument('-s', '--search-type', nargs='?', default=None)
-    parser.add_argument('-t', '--search-time', nargs='?', type=int, default=None)
-    parser.add_argument('-m', '--mljar-mode', nargs='?', default="Compete")
-    parser.add_argument('-e', '--eval-metric', nargs='?', default="accuracy")
+    parser.add_argument('-d', '--data-sheet', default=None)
+    #parser.add_argument('-u', '--use-sample', dest='use_sample', default=False, action='store_true')
+    parser.add_argument('-c', '--competition', default='pump')
+    #parser.add_argument('-s', '--search-type', nargs='?', default='flaml')
+    #parser.add_argument('-t', '--search-time', nargs='?', type=int, default=5000)
+    #parser.add_argument('-m', '--mljar-mode', nargs='?', default="Compete")
+    #parser.add_argument('-e', '--eval-metric', nargs='?', default="accuracy")
     
     args = parser.parse_args()
+    
+    if args.competition == "pump":
+        target_col = "status_group"
+        id_col = "id"
+        data_dir = "pump/data"
+        out_dir = "pump/out"
+        eval_metric = "accuracy"
+    else:
+        print("Error: unknown competition type: {}".format(args.competition))
+        return
+    
+    data_sheet_files = []
+    if args.data_sheet is not None:
+        data_sheet_files = [args.data_sheet]
         
-    runname = str(uuid.uuid4())
+    else:
+        # Read directory
+        for file in os.listdir(data_dir):
+            if file.endswith(".json"):
+                data_sheet_files.append(os.path.join(data_dir, file))
+        
+        shuffle(data_sheet_files)
+        print("DEBUG: Found {} data sheets.".format(len(data_sheet_files)))
+    
+    
 
-    print("Run name: {}".format(runname))
+        
+    def run_data_sheet(data_sheet, target_col, id_col, data_dir, out_dir, eval_metric): 
+        
+        data_id = data_sheet.get('data_id', None)
+        config_summary = data_sheet.get('config_summary', None)
+        if data_id is None or config_summary is None:
+            raise Exception("Error: Data sheet does not contain data id or config summary.")
+            
+        print("DEBUG: Running data_id {}".format(data_id))
+        print("DEBUG: Running config_summary {}".format(config_summary))
+        
+        search_time = 10000
+        search_type = "FLAML"
+        
+        # Check if we even need to run this
+        runs = data_sheet.get('runs', {})
+        for run in runs:
+            if runs[run].get('search_type', '') == search_type and runs[run].get('search_time', 0) == search_time:
+                print("Early stopping. Run already completed for data sheet. Skipping")
+                return data_sheet
+        
+        # This structure will hold all the results and will be dumped to disk.
+        run = {}
+        runname = str(uuid.uuid4())
+        run['runname'] = runname
+        run['hostname'] = socket.gethostname()
+        run['search_type'] = search_type
+        run['search_time'] = search_time
+        run['eval_metric'] = eval_metric
+        
+        print("Run name: {}".format(runname))
+        
+        train_fn = data_sheet.get('fn_train', None)
+        test_fn = data_sheet.get('fn_test', None)
+        
+        if train_fn is None or test_fn is None:
+            raise Exception("Error: cannot find train or test file names")
+        
+        train_fn = os.path.join(data_dir, os.path.basename(train_fn))
+        test_fn = os.path.join(data_dir, os.path.basename(test_fn))
+   
+        print("DEBUG: Reading training data {}".format(train_fn))
+        train_df = pd.read_csv(train_fn)
+            
+        X_train = train_df.drop([target_col, id_col], axis=1)
+        y_train = train_df[target_col]
 
-    # This structure will hold all the results and will be dumped to disk.
-    results = {}
-    results['runname'] = runname
-    results['starttime'] = str(datetime.datetime.now())
-    results['hostname'] = socket.gethostname()
-    
-    # Read the settings file
-    print("DEBUG: Reading settings file")
-    with open(args.settings_file) as f:
-        config = json.load(f)
-    
-    train_fn = config.get('train_filename', None)
-    test_fn = config.get('test_filename', None)
-    target = config.get('target_col', 'status_group')
-    id_col = config.get('id_col', 'id')
-    
-    search_type = args.search_type
-    if search_type is None:
-        search_type = config.get('search_type', 'flaml')
-        
-    search_iters = config.get('search_iters', 100)
-    
-    search_time = args.search_time
-    if search_time is None:
-        search_time = config.get('search_time', 100)
-        
-    estimator_list = config.get('estimator_list', ['lgbm', 'xgboost', 'rf', 'extra_tree'])
-    drop_cols = config.get('drop_cols', None)
-    
-    results['use_ensemble'] = args.use_ensemble
-    results['use_sample'] = args.use_sample
-    results['search_type'] = search_type
-    results['search_time'] = search_time
-    results['mljar_mode'] = args.mljar_mode
-    results['eval_metric'] = args.eval_metric
-    results['settings'] = config
-    
-    print("DEBUG: Settings:")
-    print(results)
-    
-    print("DEBUG: Reading training data")
-    train_df = pd.read_csv(train_fn)
-    if drop_cols is not None:
-        train_df = train_df.drop(drop_cols, axis=1)
-        
-    if args.use_sample:
-        print("DEBUG: Taking sample")
-        train_df = train_df.sample(frac=0.2, random_state=42)
-        
-    X_train = train_df.drop([target, id_col], axis=1)
-    y_train = train_df[target]
-    
-    #results['X_train_head'] = X_train.head().to_dict()
-    
-    X_test = None
-    if test_fn is not None:
-        print("DEBUG: Reading testing data")
+        print("DEBUG: Reading testing data {}".format(test_fn))
         test_df = pd.read_csv(test_fn)
-        if drop_cols is not None:
-            test_df = test_df.drop(drop_cols, axis=1)
         X_test = test_df.drop([id_col], axis=1)
-        results['X_test_head'] = X_test.head().to_dict()
     
-    pipe = None
-    
-    if search_type == "mljar":
-        from supervised.automl import AutoML # mljar-supervised
-        
-        print("DEBUG: mljar mode={}, model_time_limit={}".format(args.mljar_mode, search_time))
-        
-        automl_settings = {
-            "mode": args.mljar_mode,
-            "model_time_limit": search_time,
-            "eval_metric": "accuracy",
-            "golden_features": True,
-            "train_ensemble": True,
-            "stack_models": True,
-            "algorithms": ['Random Forest', 'Extra Trees', 'LightGBM', 'Xgboost', 'CatBoost'],
-            "results_path": "out/{}".format(runname),
-            "explain_level": 0,
-            "feature_selection": True,
-            "start_random_models": True,
-            "kmeans_features": False,
-            "max_single_prediction_time": None,
-            "n_jobs": 10,
-            "verbose": 1,
-        }
-        
-        pipe = AutoML(**automl_settings)
-        pipe.fit(X_train, y_train)
-    
-    elif search_type == "autogluon":
-        from autogluon.tabular import TabularDataset, TabularPredictor
-        
-        _df = X_train.copy()
-        _df[target] = y_train
-        
-        #excluded_model_types = ['KNN', 'NN']
-        
-        hp = {'RF':{}, 'GBM':{}, 'CAT':{}, 'XT':{}, 'custom': ['GBMLarge']}
-        pipe = TabularPredictor(label=target, eval_metric="accuracy")
-        pipe.fit(_df, time_limit=search_time, presets="best_quality", hyperparameters=hp)
-        
-        #pipe.fit(_df, time_limit=search_time, presets="best_quality", excluded_model_types=excluded_model_types)
-        
-        print(pipe.fit_summary())
-    
-    elif search_type == "hist":
-        from sklearn.experimental import enable_hist_gradient_boosting  # noqa
-        from sklearn.ensemble import HistGradientBoostingClassifier
-
-        cat_features=None
-        
-        if True:
-            cat_feature_names= ['enc_0','enc_1','enc_2','enc_3',
-                       'enc_4','enc_5','enc_6','enc_7','enc_8','enc_9','enc_10',
-                       'enc_11','enc_12','enc_13','enc_14','enc_15','enc_16',
-                       'enc_17','enc_18','enc_19','enc_20','enc_21','enc_22']
-            
-            cat_features = []
-            for cat_feature_name in cat_feature_names:
-                cat_features.append(list(X_train.columns).index(cat_feature_name))
-            print("DEBUG: cat_features: {}".format(cat_features))
-
-        clf = HistGradientBoostingClassifier(categorical_features = cat_features, random_state=42)
-        
-        param_grid = {
-            'max_iter': randint(500, 1500),
-            'max_leaf_nodes': randint(31, 255),
-            'max_bins': randint(102, 255),
-            'learning_rate': uniform(0.001, 0.05),
-
-        }
-
-        pipe = RandomizedSearchCV(clf, param_grid, n_iter=search_iters, n_jobs=10, cv=2, scoring='accuracy', return_train_score=True, verbose=1)
-        pipe.fit(X_train, y_train)
-
-        results['cv_results_'] = pipe.cv_results_
-        tbl = cv_results_to_df(pipe.cv_results_)
-        tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
-        
-    elif search_type == "RF":
-        clf = RandomForestClassifier(n_jobs=-1, bootstrap=True, n_estimators=1000)
-
-        param_grid = {
-            #'n_estimators': randint(150, 500),
-            #'n_estimators': randint(4, 1500),
-            'max_features': uniform(0.1, 0.9),
-            #'min_samples_leaf': randint(1,5),
-            #'max_depth': randint(10, 75),
-            #'ccp_alpha': uniform(0.0, 0.02),
-            'criterion':['gini', 'entropy'],
-            'class_weight':['balanced', 'balanced_subsample', None],
-        }
-
-        pipe = RandomizedSearchCV(clf, param_grid, n_iter=search_iters, n_jobs=10, cv=2, scoring='accuracy', return_train_score=True, verbose=1)
-        pipe.fit(X_train, y_train)
-        
-        fe = pd.DataFrame({'feature':X.columns, 'importance': pipe.best_estimator_.feature_importances_})
-        results['feature_importances_'] = fe.sort_values('importance', ascending=False).to_dict()
-        results['oob_score_'] = pipe.best_estimator_.oob_score_
-        
-        results['max_depths'] = [tree.tree_.max_depth for tree in pipe.best_estimator_.estimators_]  
-        results['node_counts'] = [tree.tree_.node_count for tree in pipe.best_estimator_.estimators_]  
-
-        results['cv_results_'] = pipe.cv_results_
-        tbl = cv_results_to_df(pipe.cv_results_)
-        tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
-        
-    elif search_type == "gpc":
-        from sklearn.gaussian_process import GaussianProcessClassifier
-        from sklearn.model_selection import ShuffleSplit
-        
-        pipe = GaussianProcessClassifier(kernel=None, n_jobs=10, warm_start=True, copy_X_train=False, n_restarts_optimizer=10, random_state=42)
-        
-        print("DEBUG: cross_val_score")
-        cv = ShuffleSplit(5, test_size=0.2, train_size=0.2, random_state=0)
-        scores = cross_val_score(pipe, X_train, y_train, cv=cv, n_jobs=1, verbose=2)
-        results['scores'] = scores
-        results['mean_scores'] = np.mean(scores)
-        print("DEBUG: scores: {}".format(scores))
-        
-        print("DEBUG: fit on full")
-        pipe.fit(X_train, y_train)
-        
-        
-    elif search_type == "stack":
-        from sklearn.experimental import enable_hist_gradient_boosting  # noqa
-        from sklearn.ensemble import HistGradientBoostingClassifier
-        
-        estimators = [
-            
-            #Best tuned for 75 mestimate
-            #('lgbm1', lgb.LGBMClassifier(colsample_bytree=0.28675389617274555, learning_rate=0.010452067895102068, 
-            #                             max_bin=1023, min_child_samples=30, n_estimators=366, n_jobs=3, 
-            #                             num_leaves=24644, objective='multiclass', reg_alpha=0.0009765625, 
-            #                             reg_lambda=0.5525418150514663, subsample=0.676715616413845)),
-            #('rf1', RandomForestClassifier(n_estimators=2048, max_features=0.210054, criterion="gini", random_state=42, n_jobs=3)),
-            #('hist', HistGradientBoostingClassifier(learning_rate=0.0512380, max_bins=137, max_iter=947, max_leaf_nodes=120, random_state=42)),
-            
-            #Best tuned for 100 mestimate
-            ('lgbm1', lgb.LGBMClassifier(colsample_bytree=0.28675389617274555, learning_rate=0.010452067895102068, 
-                                         max_bin=1023, min_child_samples=30, n_estimators=366, n_jobs=3, 
-                                         num_leaves=24644, objective='multiclass', reg_alpha=0.0009765625, 
-                                         reg_lambda=0.5525418150514663, subsample=0.676715616413845)),
-            ('rf1', RandomForestClassifier(n_estimators=2048, max_features=0.210054, criterion="gini", random_state=42, n_jobs=3)),
-            ('hist', HistGradientBoostingClassifier(learning_rate=0.0512380, max_bins=137, max_iter=947, max_leaf_nodes=120, random_state=42)),
-        ]
-        
-        #0.051238087074071514,134,947,120
-        
-        fe = LogisticRegression()
-        #fe = RandomForestClassifier()
-       
-        pipe = StackingClassifier(estimators=estimators, final_estimator=fe, cv=5, n_jobs=2)
-        
-        #print("DEBUG: cross_val_score")
-        #scores = cross_val_score(pipe, X_train, y_train, cv=2, n_jobs=1, verbose=2)
-        #results['scores'] = scores
-        #results['mean_scores'] = np.mean(scores)
-        
-        print("DEBUG: fit on full")
-        pipe.fit(X_train, y_train)
-
-    elif search_type == "flaml":
-        
-        from flaml import AutoML
-        
         pipe = AutoML()
         automl_settings = {
             "time_budget": search_time,
             "task": 'classification',
-            "log_file_name": "out/flaml-{}.log".format(runname),
+            "log_file_name": "{}/flaml-{}.log".format(out_dir, runname),
             "n_jobs": 10,
-            "estimator_list": estimator_list,
+            "estimator_list": ['lgbm', 'xgboost', 'rf', 'extra_tree', 'catboost'],
             "model_history": True,
-            #"eval_method": "cv",
-            #"n_splits": 3,
-            "metric": args.eval_metric,
-            #"metric": custom_metric,
+            "eval_method": "cv",
+            "n_splits": 3,
+            "metric": eval_metric,
             "log_training_metric": True,
             "verbose": 1,
-            "ensemble": args.use_ensemble,
+            "ensemble": True,
         }
 
-        results['automl_settings'] = jsonpickle.encode(automl_settings, unpicklable=False, keys=True)
+        run['flaml_settings'] = jsonpickle.encode(automl_settings, unpicklable=False, keys=True)
 
-        results['starttime'] = str(datetime.datetime.now())
-        
+        run['starttime'] = str(datetime.datetime.now())
         pipe.fit(X_train, y_train, **automl_settings)
-        results['endtime'] = str(datetime.datetime.now())
+        run['endtime'] = str(datetime.datetime.now())
 
-        results['best_estimator'] = pipe.best_estimator
-        results['best_config'] = pipe.best_config
-        results['best_loss'] = 1-pipe.best_loss
-        results['best_model'] = '{}'.format(str(pipe.model))
+        run['best_estimator'] = pipe.best_estimator
+        run['best_config'] = pipe.best_config
+        run['best_model'] = '{}'.format(str(pipe.model))
+        run['val_score'] = 1-pipe.best_loss
         
-        print(results['best_loss'])
-        
-    elif search_type == "autosklearn":
-        
-        import autosklearn.classification
-        
-        automl_settings = {
-            "time_left_for_this_task": search_time,
-            "n_jobs": 20,
-            #"include_estimators": estimator_list,   
-            "memory_limit": 20 * 1024,
-        }
-        
-        pipe = autosklearn.classification.AutoSklearnClassifier(**automl_settings)
-        pipe.fit(X_train, y_train)
-        
-        results['cv_results_'] = pipe.cv_results_
-        #tbl = cv_results_to_df(pipe.cv_results_)
-        #tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
-        
-    elif search_type == "svm":
-        from sklearn.svm import SVC, LinearSVC
-        from sklearn.pipeline import make_pipeline
-        from sklearn.preprocessing import StandardScaler
-        from scipy.stats import reciprocal, uniform
-        from sklearn.model_selection import ShuffleSplit
-        
-        clf = make_pipeline(StandardScaler(), LinearSVC())
-
-        param_grid = {
-            #"svc__gamma": reciprocal(0.001, 0.1),
-            "linearsvc__C": uniform(1, 5),
-            #"svc__kernel": ['linear', 'poly', 'rbf', 'sigmoid'],
-            #"svc__kernel": ['linear'],
-            "linearsvc__dual": [True, False],
-            "linearsvc__penalty": ['l1', 'l2'],
-            "linearsvc__class_weight": ['balanced', None],
-        }
-
-        cv = ShuffleSplit(2, test_size=0.2, train_size=0.7, random_state=0)
-        pipe = RandomizedSearchCV(clf, param_grid, n_iter=search_iters, n_jobs=3, cv=cv, scoring='accuracy', return_train_score=True, verbose=1)
-        pipe.fit(X_train, y_train)
-        
-        results['cv_results_'] = pipe.cv_results_
-        tbl = cv_results_to_df(pipe.cv_results_)
-        tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
-        
-    elif search_type == "knn":
-        from sklearn.neighbors import KNeighborsClassifier
-        from sklearn.pipeline import make_pipeline, Pipeline
-        from sklearn.preprocessing import StandardScaler
-        from scipy.stats import reciprocal, uniform
-        from sklearn.model_selection import ShuffleSplit
-        
-        clf = Pipeline(steps=[('scaler', StandardScaler()), ('clf', KNeighborsClassifier())])
-
-        param_grid = {
-            "clf__n_neighbors": randint(3, 30),
-            "clf__weights": ['uniform', 'distance'],
-            "clf__p": [1, 2, 3],
-        }
-
-        cv = ShuffleSplit(2, test_size=0.10, train_size=0.20, random_state=0)
-        pipe = RandomizedSearchCV(clf, param_grid, n_iter=search_iters, n_jobs=5, cv=cv, scoring='accuracy', return_train_score=True, verbose=1)
-        pipe.fit(X_train, y_train)
-        
-        results['cv_results_'] = pipe.cv_results_
-        tbl = cv_results_to_df(pipe.cv_results_)
-        tbl.to_csv("out/{}-cv_results.csv".format(runname), index=False)
-        
-    if pipe is not None and X_test is not None:
-        preds = pipe.predict(X_test)
-        submission = pd.DataFrame(data={'id': test_df[id_col], target: preds})
-        submission.to_csv("out/{}-stepthom_submission.csv".format(runname), index=False)
-        
-        
-        
-        if callable(getattr(pipe, 'predict_proba')):
-            probas = pipe.predict_proba(X_test)
-            columns = None
-            if hasattr(pipe, 'classes_'):
-                columns = pipe.classes_
-            probas_df = pd.DataFrame(probas, columns=columns)
-            probas_df[id_col] = test_df[id_col]
-            probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
-            probas_df.to_csv("out/{}-probas.csv".format(runname), index=False)
-        
-    results['endtime'] = str(datetime.datetime.now())
-    dump_results(runname, results)
+        print("FLAML val score: {}".format(run['val_score']))
     
-    print("Run name: {}".format(runname))
+        preds = pipe.predict(X_test)
+        preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
+        preds_fn = os.path.join(out_dir, "{}-{}-preds.csv".format(data_id, runname))
+        preds_df.to_csv(preds_fn, index=False)
+        
+        probas = pipe.predict_proba(X_test)
+        columns = None
+        if hasattr(pipe, 'classes_'):
+            columns = pipe.classes_
+        probas_df = pd.DataFrame(probas, columns=columns)
+        probas_df[id_col] = test_df[id_col]
+        probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
+        probas_fn = os.path.join(out_dir, "{}-{}-probas.csv".format(data_id, runname))
+        probas_df.to_csv(probas_fn, index=False)
+        
+        run['endtime'] = str(datetime.datetime.now())
+        
+        run['preds_fn'] = preds_fn
+        run['probas_fn'] = probas_fn
+        
+        runs[runname] = run
+        
+        data_sheet['runs'] = runs
+    
+        print("DEBUG: Run name: {}".format(runname))
+        print("DEBUG: Config summary: {}".format(config_summary))
+        
+        return data_sheet
+    
+    
+    for data_sheet_file in data_sheet_files:
+        data_sheet = {}
+        with open(data_sheet_file) as f:
+            data_sheet = json.load(f)
+            
+        data_sheet = run_data_sheet(data_sheet, target_col, id_col, data_dir, out_dir, eval_metric)
+        dump_json(data_sheet_file, data_sheet)
 
 if __name__ == "__main__":
     main()

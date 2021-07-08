@@ -26,14 +26,6 @@ import geopy.distance
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-
-def add_indicator(X, col, missing_vals=[], replace_val=np.nan):
-    col_new = "{}_missing".format(col)
-    X[col_new] = X[col].apply(lambda x: 1 if x in missing_vals else 0)
-    for missing_val in missing_vals:
-        X[col] = X[col].replace(missing_val, replace_val)
-    return X
-
 def add_datetime(X, column):
     tmp_dt = X[column].dt
     new_columns_dict = {f'year_{column}': tmp_dt.year, f'month_{column}': tmp_dt.month,
@@ -159,7 +151,7 @@ def hack(X, y=None, train=False,
         df[col] = df[col].replace(0, np.nan)
                 
     ##################################################
-    # Add missing value indicators
+    # Numeric: Add missing value indicators
     ##################################################
     
     # Must happen before numbers are imputed!
@@ -175,7 +167,7 @@ def hack(X, y=None, train=False,
         
     
     ####################################################
-    # Special Impute: replace with region means
+    # Numeric: Special Impute: replace with region means
     ####################################################
     print("DEBUG: hack: special imputing")
     # Note: the following only works since we've added indicators and replaced "missing" values with np.nan.
@@ -201,7 +193,7 @@ def hack(X, y=None, train=False,
     
     
     ##################################################
-    # Impute missing numeric values
+    # Numeric: Impute missing  values
     ##################################################
     print("DEBUG: hack: simple numeric imputing")
     # Impute Missing Value
@@ -270,7 +262,7 @@ def hack(X, y=None, train=False,
     df[cat_cols] = df[cat_cols].astype('category')
                 
     ##################################################
-    # Categorical Smushing
+    # Categorical Encoding
     ##################################################
 
     # Encoding
@@ -376,6 +368,14 @@ def main():
                             results['keep_top'] = keep_top
                             results['special_impute_cols'] = special_impute_cols
                             
+                            config_summary = "{}_{}_{}_{}_{}".format(str(num_indicator), 
+                                                                     str(num_imputer),
+                                                                     str(cat_encoder), 
+                                                                     keep_top, 
+                                                                     special_impute_cols)
+                            
+                            results['config_summary'] = config_summary
+                            
                             top_n_values = {}
                             val_by_regions = {}
 
@@ -420,7 +420,7 @@ def main():
 
                             results['endtime'] = str(datetime.datetime.now())
                             dump_results(data_id, results)
-                            print("Args: {}".format(hack_args))
+                            print("config_summary: {}".format(config_summary))
                             print("Data ID: {}".format(data_id))
 
 if __name__ == "__main__":
