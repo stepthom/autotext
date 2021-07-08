@@ -53,15 +53,8 @@ def dump_json(fn, json_obj):
 
 def main():    
     parser = argparse.ArgumentParser()
-    #parser.add_argument("settings_file", help="Path to JSON settings/config file.")
-    
     parser.add_argument('-d', '--data-sheet', default=None)
-    #parser.add_argument('-u', '--use-sample', dest='use_sample', default=False, action='store_true')
     parser.add_argument('-c', '--competition', default='pump')
-    #parser.add_argument('-s', '--search-type', nargs='?', default='flaml')
-    #parser.add_argument('-t', '--search-time', nargs='?', type=int, default=5000)
-    #parser.add_argument('-m', '--mljar-mode', nargs='?', default="Compete")
-    #parser.add_argument('-e', '--eval-metric', nargs='?', default="accuracy")
     
     args = parser.parse_args()
     
@@ -71,6 +64,18 @@ def main():
         data_dir = "pump/data"
         out_dir = "pump/out"
         eval_metric = "accuracy"
+    elif args.competition == "h1n1":
+        target_col = "h1n1_vaccine"
+        id_col = "respondent_id"
+        data_dir = "h1n1/data"
+        out_dir = "h1n1/out"
+        eval_metric = "roc_auc"
+    elif args.competition == "seasonal":
+        target_col = "seasonal_vaccine"
+        id_col = "respondent_id"
+        data_dir = "seasonal/data"
+        out_dir = "seasonal/out"
+        eval_metric = "roc_auc"
     else:
         print("Error: unknown competition type: {}".format(args.competition))
         return
@@ -88,8 +93,6 @@ def main():
         shuffle(data_sheet_files)
         print("DEBUG: Found {} data sheets.".format(len(data_sheet_files)))
     
-    
-
         
     def run_data_sheet(data_sheet, target_col, id_col, data_dir, out_dir, eval_metric): 
         
@@ -107,9 +110,17 @@ def main():
         # Check if we even need to run this
         runs = data_sheet.get('runs', {})
         for run in runs:
-            if runs[run].get('search_type', '') == search_type and runs[run].get('search_time', 0) == search_time:
-                print("Early stopping. Run already completed for data sheet. Skipping")
+            if (runs[run].get('search_type', '') == search_type and 
+                runs[run].get('search_time', 0) == search_time and
+                runs[run].get('eval_metric', '') == eval_metric):
+                print("Early stopping. Run already completed for data sheet. Skipping.")
                 return data_sheet
+            
+        # Tmp hack because of FLAML bug #130
+        cat_enc = data_sheet.get('cat_encoder', '')
+        if cat_enc == "None":
+            print("Skipping this data sheet because cat_encoder is None and FLAML bug #130. Skipping.")
+            return data_sheet
         
         # This structure will hold all the results and will be dumped to disk.
         run = {}

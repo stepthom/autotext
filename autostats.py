@@ -57,15 +57,15 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--data_file", help="Path to data file on which to run stats.")
+        "--data-file", help="Path to data file on which to run stats.")
     parser.add_argument(
-        "--target_col", help="Name of target column in data_file.")
+        "--target-col", help="Name of target column in data_file.")
     parser.add_argument(
-        "--output_file", help="Path to output results file.", nargs="?", default="out/stats-out.json")
+        "--output-file", help="Path to output results file.", nargs="?", default="out/stats-out.json")
     parser.add_argument(
-        "--drop_cols", help="Columns to drop.", nargs="*", default=[])
+        "--drop-cols", help="Columns to drop.", nargs="*", default=[])
     parser.add_argument(
-        "--skip_scores", help="Don't run ExtraTreesClassifier to compute feature importances.", action="store_true")
+        "--skip-scores", help="Don't run ExtraTreesClassifier to compute feature importances.", action="store_true")
     parser.add_argument(
         "--target-only", help="Just compute stats on the target feature.", action="store_true")
     args = parser.parse_args()
@@ -184,13 +184,13 @@ def main():
             df[col_name].fillna(0), df[args.target_col])
 
         try:
-            a = df[col_name][y == results['labels'][0]]
-            b = df[col_name][y == results['labels'][1]]
+            a = df[col_name][y == results['target']['labels'][0]]
+            b = df[col_name][y == results['target']['labels'][1]]
             ts['mannwhitneyu'] = stats.mannwhitneyu(a, b)
         except ValueError:
             pass
 
-        for label in results['labels']:
+        for label in results['target']['labels']:
             _tmp = df[df[args.target_col] == label]
             ts['target_{}_stats'.format(label)] = get_numeric_stats(
                 _tmp[col_name])

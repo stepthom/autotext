@@ -315,13 +315,14 @@ def dump_results(runname, results):
 def main():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("-t", "--train-input", help="train file name", default="data/pump_train.csv")
-    parser.add_argument("-s", "--test-input", help="test file name", default="data/pump_test.csv")
+    parser.add_argument("-t", "--train-input", help="train file name", default="pump/data/pump_train.csv")
+    parser.add_argument("-s", "--test-input", help="test file name", default="pump/data/pump_test.csv")
     args = parser.parse_args()
     
     train_df= pd.read_csv(args.train_input, parse_dates=['date_recorded'])
     test_df = pd.read_csv(args.test_input, parse_dates=['date_recorded'])
     
+    data_dir = "pump/data"
     target_col = "status_group"
     id_col = "id" 
     
