@@ -9,12 +9,14 @@ import json
 import socket
 import datetime
 
+import gc
+
 from random import shuffle
 
 from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.model_selection import ShuffleSplit
-import lightgbm as lgb
+#import lightgbm as lgb
 from sklearn.metrics import classification_report
 from sklearn.metrics import confusion_matrix, accuracy_score, f1_score, recall_score, precision_score, roc_auc_score
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, StackingClassifier, RandomForestRegressor
@@ -22,7 +24,7 @@ from sklearn.linear_model import LogisticRegression
 
 from scipy.stats import uniform, randint
 
-import ConfigSpace.read_and_write.json as config_json
+#import ConfigSpace.read_and_write.json as config_json
 
 import jsonpickle
 
@@ -76,6 +78,12 @@ def main():
         data_dir = "seasonal/data"
         out_dir = "seasonal/out"
         eval_metric = "roc_auc"
+    elif args.competition == "earthquake":
+        target_col = "damage_grade"
+        id_col = "building_id"
+        data_dir = "earthquake/data"
+        out_dir = "earthquake/out"
+        eval_metric = "micro_f1"
     else:
         print("Error: unknown competition type: {}".format(args.competition))
         return
@@ -104,8 +112,9 @@ def main():
         print("DEBUG: Running data_id {}".format(data_id))
         print("DEBUG: Running config_summary {}".format(config_summary))
         
-        search_time = 10000
+        search_time = 2000
         search_type = "FLAML"
+        
         
         # Check if we even need to run this
         runs = data_sheet.get('runs', {})
@@ -207,6 +216,9 @@ def main():
     
         print("DEBUG: Run name: {}".format(runname))
         print("DEBUG: Config summary: {}".format(config_summary))
+        
+        del pipe
+        gc.collect()
         
         return data_sheet
     

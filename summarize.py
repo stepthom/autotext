@@ -29,16 +29,33 @@ def dump_json(fn, json_obj):
 
 def main():    
     parser = argparse.ArgumentParser()
-    parser.add_argument('-d', '--data-dir', default="pump/data")
-    parser.add_argument('-o', '--output-file', default="pump/results.csv")
-    
+    parser.add_argument('-c', '--competition', default='pump')
     args = parser.parse_args()
+   
+    data_dir = None
+    output_file = None
+    if args.competition.startswith("p"):
+        data_dir = "pump/data"
+        output_file = "pump/results.csv"
+    elif args.competition.startswith("h"):
+        data_dir = "h1n1/data"
+        output_file = "h1n1/results.csv"
+    elif args.competition.startswith("s"):
+        data_dir = "seasonal/data"
+        output_file = "seasonal/results.csv"
+    elif args.competition.startswith("e"):
+        data_dir = "earthquake/data"
+        output_file = "earthquake/results.csv"
+    else:
+        print("Error: unknown competition type: {}".format(args.competition))
+        return
+    
     
     # Read directory
     data_sheet_files = []
-    for file in os.listdir(args.data_dir):
+    for file in os.listdir(data_dir):
         if file.endswith(".json"):
-            data_sheet_files.append(os.path.join(args.data_dir, file))
+            data_sheet_files.append(os.path.join(data_dir, file))
 
     print("DEBUG: Found {} data sheets.".format(len(data_sheet_files)))
    
@@ -66,7 +83,11 @@ def main():
                     'keep_top': data_sheet.get('keep_top', ''),
                     'special_imput_cols': str(data_sheet.get('special_impute_cols', '')),
                     'impute_cat': data_sheet.get('impute_cat', ''),
+                    'autofeat': data_sheet.get('autofeat', ''),
+                    'dimreduc': data_sheet.get('dimreduc', ''),
+                    'feature_selector': data_sheet.get('feature_selector', ''),
                     'runname': run,
+                    'endtime': runs[run].get('endtime', ''),
                     'search_type': runs[run].get('search_type', ''),
                     'search_time': runs[run].get('search_time', ''),
                     'eval_metric': runs[run].get('eval_metric', ''),
@@ -76,7 +97,8 @@ def main():
     df = pd.DataFrame(res)
     df = df.sort_values('val_score', ascending=False)
     print(df)
-    df.to_csv(args.output_file, index=False)
+    df.to_csv(output_file, index=False)
+    print("DEBUG: Wrote results file: {}".format(output_file))
 
 if __name__ == "__main__":
     main()
