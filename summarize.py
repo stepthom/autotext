@@ -5,8 +5,6 @@ import os
 
 import json
 
-import jsonpickle
-
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.ndarray):
@@ -26,54 +24,36 @@ def dump_json(fn, json_obj):
     with open(fn, 'w') as fp:
         json.dump(json_obj, fp, indent=4, cls=NumpyEncoder)
 
+def summarize(data_dir, output_file):
 
-def main():    
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-c', '--competition', default='pump')
-    args = parser.parse_args()
-   
-    data_dir = None
-    output_file = None
-    if args.competition.startswith("p"):
-        data_dir = "pump/data"
-        output_file = "pump/results.csv"
-    elif args.competition.startswith("h"):
-        data_dir = "h1n1/data"
-        output_file = "h1n1/results.csv"
-    elif args.competition.startswith("s"):
-        data_dir = "seasonal/data"
-        output_file = "seasonal/results.csv"
-    elif args.competition.startswith("e"):
-        data_dir = "earthquake/data"
-        output_file = "earthquake/results.csv"
-    else:
-        print("Error: unknown competition type: {}".format(args.competition))
-        return
-    
-    
     # Read directory
     data_sheet_files = []
     for file in os.listdir(data_dir):
         if file.endswith(".json"):
             data_sheet_files.append(os.path.join(data_dir, file))
 
-    print("DEBUG: Found {} data sheets.".format(len(data_sheet_files)))
-   
+    print("DEBUG: Found {} data sheets in {}.".format(len(data_sheet_files), data_dir))
+
     res = []
     for data_sheet_file in data_sheet_files:
         data_sheet = {}
         with open(data_sheet_file) as f:
-            data_sheet = json.load(f)
             
+            try:
+                data_sheet = json.load(f)
+            except:
+                print("ERROR: cannot parse json file {}".format(data_sheet_file))
+                continue
+
             data_id = data_sheet.get('data_id', None)
             config_summary = data_sheet.get('config_summary', None)
             if data_id is None or config_summary is None:
                 print("DEBUG: skipping file is not a datasheet: {}".format(data_sheet_file))
                 continue
-                
+
             runs = data_sheet.get('runs', {})
             for run in runs:
-                
+
                 res.append({
                     'data_id': data_id,
                     'config_summary': config_summary,
@@ -93,12 +73,25 @@ def main():
                     'eval_metric': runs[run].get('eval_metric', ''),
                     'val_score': runs[run].get('val_score', ''),
                 })
-                
+
     df = pd.DataFrame(res)
     df = df.sort_values('val_score', ascending=False)
-    print(df)
+    print(df.head())
+    print(df.shape)
     df.to_csv(output_file, index=False)
     print("DEBUG: Wrote results file: {}".format(output_file))
+    return
+
+
+def main():    
+    parser = argparse.ArgumentParser()
+    args = parser.parse_args()
+    
+    summarize("pump/data", "pump/results.csv")
+    summarize("h1n1/data", "h1n1/results.csv")
+    summarize("seasonal/data", "seasonal/results.csv")
+    summarize("earthquake/data", "earthquake/results.csv")
+   
 
 if __name__ == "__main__":
     main()

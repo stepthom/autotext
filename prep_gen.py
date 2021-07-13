@@ -7,12 +7,15 @@ import datetime
 import socket
 import pandas as pd
 import uuid
+from itertools import product
+
 from autofeat import AutoFeatRegressor, AutoFeatClassifier, AutoFeatLight
 
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, FunctionTransformer, OrdinalEncoder
 from sklearn.decomposition import KernelPCA
 from sklearn.feature_selection import SelectFromModel
 from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.decomposition import TruncatedSVD
 
 from sklearn.impute import SimpleImputer, MissingIndicator
 from pandas.api.types import is_numeric_dtype
@@ -20,16 +23,14 @@ from pandas.api.types import is_numeric_dtype
 import category_encoders as ce
 from category_encoders.wrapper import PolynomialWrapper
 
+import geopy.distance
+
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-
-def add_indicator(X, col, missing_vals=[], replace_val=np.nan):
-    col_new = "{}_missing".format(col)
-    X[col_new] = X[col].apply(lambda x: 1 if x in missing_vals else 0)
-    for missing_val in missing_vals:
-        X[col] = X[col].replace(missing_val, replace_val)
-    return X
+######################################
+# Generic helper functions
+#######################################
 
 def add_datetime(X, column):
     tmp_dt = X[column].dt
@@ -62,9 +63,90 @@ def keep_only(X, column, keep_list, replace_val='__OTHER__'):
     return X
 
 
-def hack(X, y=None, train=False, 
+######################################
+# Custom functions for water pump
+#######################################
+def pump_datatype_func(df, train=False):
+    df['construction_year']= pd.to_numeric(df['construction_year'])
+    df['public_meeting'] = df['public_meeting'].astype('str')
+    df['permit'] = df['permit'].astype('str')
+    df['date_recorded'] = pd.to_datetime(df['date_recorded'])
+    return df
+
+def pump_date_func(df, train=False):
+    df = add_datetime(df, 'date_recorded')
+    baseline = pd.datetime(2014, 1, 1)
+    df['date_recorded_since'] = (baseline - df['date_recorded']).dt.days
+    df['timediff'] = df['year_date_recorded'] - df['construction_year']
+    df = df.drop(['date_recorded'], axis=1)
+    return df
+
+def pump_latlong_func(df, train=False):
+    daressalaam = (-6.8, 39.283333)
+    mwanza = (-2.516667, 32.9)
+    arusha = (-3.366667, 36.683333)
+    dodoma = (-6.173056, 35.741944)
+    df['daressallam_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(daressalaam, (x[0], x[1])).km, axis=1)
+    df['mwanza_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(mwanza, (x[0], x[1])).km, axis=1)
+    df['arusha_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(arusha, (x[0], x[1])).km, axis=1)
+    df['dodoma_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(dodoma, (x[0], x[1])).km, axis=1)
+    return df
+
+def pump_weirdvals_func(df, train=False):
+    strzero_cols = ['funder', 'installer']
+    for col in strzero_cols:
+        df[col] = df[col].replace('0', np.nan)
+        
+    none_cols = ['wpt_name']
+    for col in none_cols:
+        df[col] = df[col].replace('none', np.nan)
+        
+    nan_cols = ['public_meeting', 'permit']
+    for col in nan_cols:
+        df[col] = df[col].replace('nan', np.nan)
+        
+    zero_cols = ['amount_tsh', 'population', 'longitude', 'gps_height']
+    for col in zero_cols:
+        df[col] = df[col].replace(0, np.nan)
+            
+    df['latitude'] = df['latitude'].round(decimals = 5)
+        
+    zero_cols = ['amount_tsh', 'population', 'longitude', 'latitude', 'gps_height']
+    for col in zero_cols:
+        df[col] = df[col].replace(0, np.nan)
+    
+    return df
+
+def pump_regionmeans_func(df, train=False):
+    
+    cols = ['gps_height', 'population', 'latitude', 'longitude']
+    
+    # Static var
+    if train and not hasattr(pump_regionmeans_func, "vals_by_region"):
+        pump_regionmeans_func.val_by_regions = {}
+        for c in cols:
+            mean_val = df[c].mean(skipna=True)
+            pump_regionmeans_func.val_by_regions[c] =  df.groupby('region_code').agg({c: lambda x: x.mean(skipna=True)}).fillna(mean_val)
+            
+    for c in cols:
+        _val_by_region = pump_regionmeans_func.val_by_regions[c]
+        df["{}_regionmean".format(c)] = df['region_code'].map(_val_by_region[c])
+        #print(df[['region_code', c,"{}_regionmean".format(c) ]].head())
+    
+    return df
+
+
+###############################################
+# The main preprocessing function
+################################################
+
+def hack(X, y=None, 
+         train=False, 
          target_col="status_group",
          id_col="id", 
+         drop_cols=[],
+         custom_begin_funcs=[],
+         custom_end_funcs=[],
          num_imputer=None, 
          num_indicator=None, 
          top_n_values=None, 
@@ -82,9 +164,24 @@ def hack(X, y=None, train=False,
     
     
     ##################################################
+    # Dropping - Won't need at all
+    ##################################################
+    if drop_cols: 
+        print("DEBUG: dropping columns {}".format(drop_cols))
+        msgs.append('Dropping cols: {}'.format(drop_cols))
+        df = df.drop(drop_cols, axis=1)
+        
+    ##################################################
+    # Custom begin functions
+    ##################################################
+    for f in custom_begin_funcs:
+        print("DEBUG: calling custom function {}".format(f))
+        df = f(df, train)
+    
+    
+    ##################################################
     # Gather data types
     ##################################################
-    
     cat_cols = []
     num_cols = []
     for c in df.columns:
@@ -103,23 +200,6 @@ def hack(X, y=None, train=False,
     
     all_cols = cat_cols + num_cols
     
-
-    ##################################################
-    # Change Types
-    ##################################################
-    #msgs.append('Changing construction_year to numeric')
-    #df['construction_year']= pd.to_numeric(df['construction_year'])
-    
-    #msgs.append('Changing public_meeting to str')
-    #df['public_meeting'] = df['public_meeting'].astype('str')
-    
-
-    ##################################################
-    # Weird values to np.nan
-    ##################################################
-    
-
-                
     ##################################################
     # Numeric: Add missing value indicators
     ##################################################
@@ -162,6 +242,13 @@ def hack(X, y=None, train=False,
     # TODO: not implemented yet
     df[cat_cols] = df[cat_cols].fillna('__NAN__')
     df[cat_cols] = df[cat_cols].astype('category')
+    
+    ##################################################
+    # Custom end functions
+    ##################################################
+    for f in custom_end_funcs:
+        print("DEBUG: calling custom end function {}".format(f))
+        df = f(df, train)
 
     ##################################################
     # Categorical Smushing
@@ -175,7 +262,7 @@ def hack(X, y=None, train=False,
         df = keep_only(df, c, top_n_values[c])
         
     df[cat_cols] = df[cat_cols].astype('category')
-                
+    
     ##################################################
     # Categorical Encoding
     ##################################################
@@ -200,8 +287,9 @@ def hack(X, y=None, train=False,
             _new_cols = pd.DataFrame(_new_cols, columns=_new_col_names)
         df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
         df = df.drop(cat_cols, axis=1)
-        
-        
+       
+    
+    
     ##################################################
     # Autofeat
     ##################################################
@@ -219,7 +307,6 @@ def hack(X, y=None, train=False,
             _new_cols = pd.DataFrame(_new_cols, columns=_new_col_names)
         df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
         
-        
     ##################################################
     # Dim reduction
     ##################################################
@@ -230,9 +317,9 @@ def hack(X, y=None, train=False,
         msgs.append("Dimreduc being called")
         _new_cols = None
         if train:
-            _new_cols = dimreduc.fit_transform(df[dimreduc_cols])
-        else:
-            _new_cols = dimreduc.transform(df[dimreduc_cols])
+            _df = df.sample(frac=0.20, replace=False, random_state=42, axis=0)
+            dim_reduc = dimreduc.fit_transform(_df[dimreduc_cols])
+        _new_cols = dimreduc.transform(df[dimreduc_cols])
         if not isinstance(_new_cols, pd.DataFrame):
             _new_col_names =  ["{}_{}".format('dimreduc', i) for i in range(_new_cols.shape[1])]
             _new_cols = pd.DataFrame(_new_cols, columns=_new_col_names)
@@ -244,7 +331,8 @@ def hack(X, y=None, train=False,
     
     if feature_selector is not None:
         fs_cols = [col for col in list(df.columns) if c != id_col]
-        print("DEBUG: hack: feature_selection on {} cols".format(len(fs_cols)))
+        print("DEBUG: feature_selection on {} cols".format(len(fs_cols)))
+        print("DEBUG: feature_selection is {}".format(str(feature_selector)))
         msgs.append("Feature selection being called")
         _new_cols = None
         if train:
@@ -257,13 +345,6 @@ def hack(X, y=None, train=False,
         df = _new_cols
         
 
-    ##################################################
-    # Dropping - don't need anymore
-    ##################################################
-    drop_cols = []
-    msgs.append("Dropping cols: {}".format(drop_cols))
-    #df = df.drop(drop_cols, axis=1)
-    
     print("DEBUG: hack returning df shape {}".format(df.shape))
 
     return df, msgs
@@ -298,39 +379,11 @@ def main():
     data_dir = None
     target_col = None
     id_col = None
-    if args.competition.startswith("p"):
-        train_input = "pump/.csv"
-        test_input = "pump/.csv"
-        data_dir = "pump/data"
-        target_col = "status_group"
-        id_col = "id"
-        out_dir = "pump/out"
-    elif args.competition.startswith("h"):
-        train_input = "h1n1/vaccine_h1n1_train.csv"
-        test_input = "h1n1/vaccine_h1n1_test.csv"
-        data_dir = "h1n1/data"
-        target_col = "h1n1_vaccine"
-        id_col = "respondent_id"
-    elif args.competition.startswith("s"):
-        train_input = "seasonal/vaccine_seasonal_train.csv"
-        test_input = "seasonal/vaccine_seasonal_test.csv"
-        data_dir = "seasonal/data"
-        target_col = "seasonal_vaccine"
-        id_col = "respondent_id"
-    elif args.competition.startswith("e"):
-        train_input = "earthquake/earthquake_train.csv"
-        test_input = "earthquake/earthquiake_test.csv"
-        data_dir = "earthquake/data"
-        target_col = "damage_grade"
-        id_col = "building_id"
-        out_dir = "earthquake/out"
-    else:
-        print("Error: unknown competition type: {}".format(args.competition))
-        return
-    
-    
-    train_df= pd.read_csv(train_input)
-    test_df = pd.read_csv(test_input)
+   
+
+    drop_colss = [[]]
+    custom_begin_funcss = [[]]
+    custom_end_funcss = [[]]
     
     num_indicators = [
        MissingIndicator(features="all"),
@@ -357,10 +410,11 @@ def main():
     ]
                                               
     dimreducs = [
-        KernelPCA(n_components=25, kernel='sigmoid', n_jobs=10, eigen_solver='arpack', max_iter=200),
-        KernelPCA(n_components=25, kernel='poly', n_jobs=10, eigen_solver="arpack", max_iter=200),
-        KernelPCA(n_components=25, kernel='rbf', n_jobs=10, eigen_solver="arpack", max_iter=200),
+        #KernelPCA(n_components=25, kernel='sigmoid', n_jobs=10, eigen_solver='arpack', max_iter=200),
+        #KernelPCA(n_components=25, kernel='poly', n_jobs=10, eigen_solver="arpack", max_iter=200),
+        #KernelPCA(n_components=25, kernel='rbf', n_jobs=10, eigen_solver="arpack", max_iter=200),
         None,
+        TruncatedSVD(n_components=25, n_iter=5, random_state=42),
     ]
     
     feature_selectors = [
@@ -368,92 +422,160 @@ def main():
         SelectFromModel(estimator=ExtraTreesClassifier(n_estimators=100, random_state=42), threshold=-np.inf, max_features=25),
     ]
     
-    for num_indicator in num_indicators:
-        for num_imputer in num_imputers:
-            for cat_encoder in cat_encoders:
-                for keep_top in keep_tops:
-                    for impute_cat in impute_cats:
-                        for autofeat in autofeats:
-                            for dimreduc in dimreducs:
-                                for feature_selector in feature_selectors:
+    if args.competition.startswith("p"):
+        train_input = "pump/pump_train.csv"
+        test_input = "pump/pump_test.csv"
+        data_dir = "pump/data"
+        target_col = "status_group"
+        id_col = "id"
+        out_dir = "pump/out"
+       
+        drop_colss =  [
+            None, 
+            ['recorded_by', 'num_private', 'scheme_name', 'payment_type', 
+             'quantity_group', 'source_type', 'waterpoint_type_group']
+        ]
+        custom_begin_funcss = [[pump_datatype_func, pump_weirdvals_func]]
+        custom_end_funcss = [[pump_date_func, pump_latlong_func, pump_regionmeans_func]]
+        keep_tops = [25, 75, 200]
+        
+    elif args.competition.startswith("h"):
+        train_input = "h1n1/vaccine_h1n1_train.csv"
+        test_input = "h1n1/vaccine_h1n1_test.csv"
+        data_dir = "h1n1/data"
+        target_col = "h1n1_vaccine"
+        id_col = "respondent_id"
+    elif args.competition.startswith("s"):
+        train_input = "seasonal/vaccine_seasonal_train.csv"
+        test_input = "seasonal/vaccine_seasonal_test.csv"
+        data_dir = "seasonal/data"
+        target_col = "seasonal_vaccine"
+        id_col = "respondent_id"
+    elif args.competition.startswith("e"):
+        train_input = "earthquake/earthquake_train.csv"
+        test_input = "earthquake/earthquake_test.csv"
+        data_dir = "earthquake/data"
+        target_col = "damage_grade"
+        id_col = "building_id"
+        out_dir = "earthquake/out"
+    else:
+        print("Error: unknown competition type: {}".format(args.competition))
+        return
+    
+    train_df= pd.read_csv(train_input)
+    test_df = pd.read_csv(test_input)
+    
+    
+    all_combos = list(product(drop_colss, custom_begin_funcss, custom_end_funcss, 
+                              num_indicators, num_imputers, 
+                              cat_encoders, keep_tops, impute_cats, 
+                              autofeats, dimreducs, feature_selectors))
+   
+    i = 0
+    for combo in all_combos:
+        i = i + 1
+        
+        drop_cols = combo[0]
+        custom_begin_funcs = combo[1]
+        custom_end_funcs = combo[2]
+        num_indicator = combo[3]
+        num_imputer = combo[4]
+        cat_encoder = combo[5]
+        keep_top = combo[6]
+        impute_cat = combo[7]
+        autofeat = combo[8]
+        dimreduc = combo[9]
+        feature_selector = combo[10]
                         
-                                    data_sheet = {}
-                                    data_id = str(uuid.uuid4())
-                                    data_sheet['data_id'] = data_id
-                                    data_sheet['starttime'] = str(datetime.datetime.now())
-                                    data_sheet['hostname'] = socket.gethostname()
-                                    data_sheet['args'] = vars(args)
+        data_sheet = {}
+        data_id = str(uuid.uuid4())
+        data_sheet['data_id'] = data_id
+        data_sheet['starttime'] = str(datetime.datetime.now())
+        data_sheet['hostname'] = socket.gethostname()
+        data_sheet['args'] = vars(args)
 
-                                    data_sheet['num_indicator'] = str(num_indicator)
-                                    data_sheet['num_imputer'] = str(num_imputer)
-                                    data_sheet['cat_encoder'] = str(cat_encoder)
-                                    data_sheet['keep_top'] = keep_top
-                                    data_sheet['impute_cat'] = impute_cat
-                                    data_sheet['autofeat'] = str(autofeat)
-                                    data_sheet['dimreduc'] = str(dimreduc)
-                                    data_sheet['feature_selector'] = str(feature_selector)
+        data_sheet['drop_cols'] = str(drop_cols)
+        data_sheet['custom_begin_funcs'] = str(custom_begin_funcs)
+        data_sheet['custom_end_funcs'] = str(custom_end_funcs)
+        data_sheet['num_indicator'] = str(num_indicator)
+        data_sheet['num_imputer'] = str(num_imputer)
+        data_sheet['cat_encoder'] = str(cat_encoder)
+        data_sheet['keep_top'] = keep_top
+        data_sheet['impute_cat'] = impute_cat
+        data_sheet['autofeat'] = str(autofeat)
+        data_sheet['dimreduc'] = str(dimreduc)
+        data_sheet['feature_selector'] = str(feature_selector)
 
-                                    config_summary = "{}_{}_{}_{}_{}_{}_{}_{}".format(str(num_indicator), 
-                                                                             str(num_imputer),
-                                                                             str(cat_encoder), 
-                                                                             keep_top, 
-                                                                             impute_cat,
-                                                                             str(autofeat),
-                                                                             str(dimreduc),
-                                                                             str(feature_selector)
-                                                                            )
+        config_summary = "{}_{}_{}_{}_{}_{}_{}_{}_{}_{}_{}".format(
+            str(drop_cols), 
+            str(custom_begin_funcs), 
+            str(custom_end_funcs), 
+            str(num_indicator), 
+            str(num_imputer),
+            str(cat_encoder), 
+            keep_top, 
+            impute_cat,
+            str(autofeat),
+            str(dimreduc),
+            str(feature_selector)
+        )
 
-                                    data_sheet['config_summary'] = config_summary
+        data_sheet['config_summary'] = config_summary
 
-                                    top_n_values = {}
+        top_n_values = {}
 
-                                    hack_args = {
-                                        "target_col": target_col,
-                                        "id_col": id_col,
-                                        "num_imputer": num_imputer,
-                                        "num_indicator": num_indicator,
-                                        "enc": cat_encoder,
-                                        "top_n_values": top_n_values,
-                                        "impute_cat": impute_cat,
-                                        "keep_top": keep_top,
-                                        "autofeat": autofeat,
-                                        "dimreduc": dimreduc,
-                                        "feature_selector": feature_selector,
-                                    } 
+        hack_args = {
+            "target_col": target_col,
+            "id_col": id_col,
+            "drop_cols": drop_cols,
+            "custom_begin_funcs": custom_begin_funcs,
+            "custom_end_funcs": custom_end_funcs,
+            "num_imputer": num_imputer,
+            "num_indicator": num_indicator,
+            "enc": cat_encoder,
+            "top_n_values": top_n_values,
+            "impute_cat": impute_cat,
+            "keep_top": keep_top,
+            "autofeat": autofeat,
+            "dimreduc": dimreduc,
+            "feature_selector": feature_selector,
+        } 
+        
+        print("DEBUG: preprocessing combo {} of {}".format(i, len(all_combos)))
+        print("DEBUG: config summary : {} ".format(config_summary))
 
-                                    X_train, train_msgs = hack(train_df.drop(target_col, axis=1), train_df[target_col], train=True, **hack_args)
-                                    X_train[target_col] = train_df[target_col]
-                                    data_sheet['train_msgs'] = train_msgs
+        X_train, train_msgs = hack(train_df.drop(target_col, axis=1), train_df[target_col], train=True, **hack_args)
+        X_train[target_col] = train_df[target_col]
+        data_sheet['train_msgs'] = train_msgs
 
-                                    X_test, test_msgs = hack(test_df, None, train=False, **hack_args)
-                                    data_sheet['test_msgs'] = test_msgs
+        X_test, test_msgs = hack(X=test_df, y=None, train=False, **hack_args)
+        data_sheet['test_msgs'] = test_msgs
 
-                                    data_sheet['top_n_values'] = top_n_values
+        data_sheet['top_n_values'] = top_n_values
 
+        def get_fn(filename, data_dir, data_id):
+            # filename will be somethingl like: h1n1/test.csv
+            # output will be data_dir/test_data_id.csv
+            name, ext = os.path.splitext(os.path.basename(filename))
+            return os.path.join(data_dir, "{}_{}{}".format(name, data_id, ext))
 
-                                    def get_fn(filename, data_dir, data_id):
-                                        # filename will be somethingl like: h1n1/test.csv
-                                                                # output will be data_dir/test_data_id.csv
-                                        name, ext = os.path.splitext(os.path.basename(filename))
-                                        return os.path.join(data_dir, "{}_{}{}".format(name, data_id, ext))
+        fn_train = get_fn(train_input, data_dir, data_id)
+        X_train.to_csv(fn_train, index=False)
+        print("DEBUG: Wrote file {}".format(fn_train))
 
-                                    fn_train = get_fn(train_input, data_dir, data_id)
-                                    X_train.to_csv(fn_train, index=False)
-                                    print("DEBUG: Wrote file {}".format(fn_train))
+        fn_test = get_fn(test_input, data_dir, data_id)
+        X_test.to_csv(fn_test, index=False)
+        print("DEBUG: Wrote file {}".format(fn_test))
 
-                                    fn_test = get_fn(test_input, data_dir, data_id)
-                                    X_test.to_csv(fn_test, index=False)
-                                    print("DEBUG: Wrote file {}".format(fn_test))
+        data_sheet['fn_train'] = fn_train
+        data_sheet['fn_test'] = fn_test
 
-                                    data_sheet['fn_train'] = fn_train
-                                    data_sheet['fn_test'] = fn_test
+        data_sheet['endtime'] = str(datetime.datetime.now())
 
-                                    data_sheet['endtime'] = str(datetime.datetime.now())
-
-                                    data_sheet_fn = os.path.join(data_dir, "{}.json".format(data_id))
-                                    dump_json(data_sheet_fn, data_sheet)
-                                    print("DEBUG: config_summary: {}".format(config_summary))
-                                    print("DEBUG: Data ID: {}".format(data_id))
+        data_sheet_fn = os.path.join(data_dir, "{}.json".format(data_id))
+        dump_json(data_sheet_fn, data_sheet)
+        print("DEBUG: config_summary: {}".format(config_summary))
+        print("DEBUG: Data ID: {}".format(data_id))
 
 if __name__ == "__main__":
     main()
