@@ -16,6 +16,7 @@ from sklearn.decomposition import KernelPCA
 from sklearn.feature_selection import SelectFromModel
 from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.decomposition import TruncatedSVD
+from sklearn.model_selection import train_test_split
 
 from sklearn.impute import SimpleImputer, MissingIndicator
 from pandas.api.types import is_numeric_dtype
@@ -312,13 +313,21 @@ def hack(X, y=None,
     ##################################################
     
     if dimreduc is not None:
-        dimreduc_cols = [col for col in list(df.columns) if c != id_col]
-        print("DEBUG: hack: dimensionality reduction on {} cols".format(len(dimreduc_cols)))
+        dimreduc_cols = [c for c in num_cols if c in list(df.columns)]
+        print("DEBUG: dimensionality reduction on {} cols".format(len(dimreduc_cols)))
+        print("DEBUG: dimensionality reduction is {}".format(str(dimreduc)))
         msgs.append("Dimreduc being called")
         _new_cols = None
         if train:
-            _df = df.sample(frac=0.20, replace=False, random_state=42, axis=0)
-            dim_reduc = dimreduc.fit_transform(_df[dimreduc_cols])
+            n_rows = df.shape[0]
+            sample_frac = 0.10
+            if n_rows > 10000:
+                sample_frac=0.02
+            elif n_rows < 30000:
+                sample_frac=0.3
+            _df = df.sample(frac=sample_frac, replace=False, random_state=42, axis=0)
+            print("_df shape: {}".format(_df.shape))
+            dimreduc = dimreduc.fit(_df[dimreduc_cols])
         _new_cols = dimreduc.transform(df[dimreduc_cols])
         if not isinstance(_new_cols, pd.DataFrame):
             _new_col_names =  ["{}_{}".format('dimreduc', i) for i in range(_new_cols.shape[1])]
@@ -331,18 +340,26 @@ def hack(X, y=None,
     
     if feature_selector is not None:
         fs_cols = [col for col in list(df.columns) if c != id_col]
-        print("DEBUG: feature_selection on {} cols".format(len(fs_cols)))
-        print("DEBUG: feature_selection is {}".format(str(feature_selector)))
+        print("DEBUG: feature_selector on {} cols".format(len(fs_cols)))
+        print("DEBUG: feature_selector is {}".format(str(feature_selector)))
         msgs.append("Feature selection being called")
         _new_cols = None
         if train:
-            _new_cols = feature_selector.fit_transform(df[fs_cols], y)
-        else:
-            _new_cols = feature_selector.transform(df[fs_cols])
+            n_rows = df.shape[0]
+            sample_frac = 0.50
+            if n_rows > 100000:
+                sample_frac=0.10
+            elif n_rows < 30000:
+                sample_frac=0.8
+            _df, _, _y, _ = train_test_split(df, y, train_size=sample_frac, random_state=42)
+            feature_selector = feature_selector.fit(_df[fs_cols], _y)
+        _new_cols = feature_selector.transform(df[fs_cols])
         if not isinstance(_new_cols, pd.DataFrame):
             _new_col_names =  ["{}_{}".format('feature_selector', i) for i in range(_new_cols.shape[1])]
             _new_cols = pd.DataFrame(_new_cols, columns=_new_col_names)
-        df = _new_cols
+            
+        # Be sure to keep index column!
+        df = pd.concat([df[[id_col]], _new_cols], axis=1, ignore_index=False)
         
 
     print("DEBUG: hack returning df shape {}".format(df.shape))
@@ -410,16 +427,16 @@ def main():
     ]
                                               
     dimreducs = [
-        #KernelPCA(n_components=25, kernel='sigmoid', n_jobs=10, eigen_solver='arpack', max_iter=200),
-        #KernelPCA(n_components=25, kernel='poly', n_jobs=10, eigen_solver="arpack", max_iter=200),
-        #KernelPCA(n_components=25, kernel='rbf', n_jobs=10, eigen_solver="arpack", max_iter=200),
+        KernelPCA(n_components=20, kernel='rbf', n_jobs=10, eigen_solver="arpack", max_iter=500),
+        KernelPCA(n_components=20, kernel='poly', n_jobs=10, eigen_solver="arpack", max_iter=500),
+        KernelPCA(n_components=20, kernel='sigmoid', n_jobs=10, eigen_solver='arpack', max_iter=500),
         None,
-        TruncatedSVD(n_components=25, n_iter=5, random_state=42),
+        TruncatedSVD(n_components=20, n_iter=5, random_state=42),
     ]
     
     feature_selectors = [
-        None,
         SelectFromModel(estimator=ExtraTreesClassifier(n_estimators=100, random_state=42), threshold=-np.inf, max_features=25),
+        None,
     ]
     
     if args.competition.startswith("p"):
@@ -438,6 +455,13 @@ def main():
         custom_begin_funcss = [[pump_datatype_func, pump_weirdvals_func]]
         custom_end_funcss = [[pump_date_func, pump_latlong_func, pump_regionmeans_func]]
         keep_tops = [25, 75, 200]
+        dimreducs = [
+            KernelPCA(n_components=5, kernel='rbf', n_jobs=10, eigen_solver="arpack", max_iter=500),
+            KernelPCA(n_components=5, kernel='poly', n_jobs=10, eigen_solver="arpack", max_iter=500),
+            KernelPCA(n_components=5, kernel='sigmoid', n_jobs=10, eigen_solver='arpack', max_iter=500),
+            None,
+            TruncatedSVD(n_components=5, n_iter=5, random_state=42),
+        ]
         
     elif args.competition.startswith("h"):
         train_input = "h1n1/vaccine_h1n1_train.csv"
@@ -458,6 +482,11 @@ def main():
         target_col = "damage_grade"
         id_col = "building_id"
         out_dir = "earthquake/out"
+        
+        dimreducs = [
+            None,
+            TruncatedSVD(n_components=25, n_iter=5, random_state=42),
+        ]
     else:
         print("Error: unknown competition type: {}".format(args.competition))
         return
@@ -508,8 +537,8 @@ def main():
 
         config_summary = "{}_{}_{}_{}_{}_{}_{}_{}_{}_{}_{}".format(
             str(drop_cols), 
-            str(custom_begin_funcs), 
-            str(custom_end_funcs), 
+            [f.__name__ for f in custom_begin_funcs], 
+            [f.__name__ for f in custom_end_funcs], 
             str(num_indicator), 
             str(num_imputer),
             str(cat_encoder), 

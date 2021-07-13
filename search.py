@@ -112,9 +112,8 @@ def main():
         print("DEBUG: Running data_id {}".format(data_id))
         print("DEBUG: Running config_summary {}".format(config_summary))
         
-        search_time = 2000
+        search_time = 1000
         search_type = "FLAML"
-        
         
         # Check if we even need to run this
         runs = data_sheet.get('runs', {})
@@ -166,7 +165,7 @@ def main():
             "time_budget": search_time,
             "task": 'classification',
             "log_file_name": "{}/flaml-{}.log".format(out_dir, runname),
-            "n_jobs": 10,
+            "n_jobs": 5,
             "estimator_list": ['lgbm', 'xgboost', 'rf', 'extra_tree', 'catboost'],
             "model_history": True,
             "eval_method": "cv",
