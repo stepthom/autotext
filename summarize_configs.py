@@ -51,35 +51,25 @@ def summarize(data_dir, output_file):
                 print("DEBUG: skipping file is not a datasheet: {}".format(data_sheet_file))
                 continue
 
-            runs = data_sheet.get('runs', {})
-            for run in runs:
-
-                res.append({
-                    'data_id': data_id,
-                    'config_summary': config_summary,
-                    'num_indicator': data_sheet.get('num_indicator', ''),
-                    'num_imputer': data_sheet.get('num_imputer', ''),
-                    'cat_encoder': data_sheet.get('cat_encoder', ''),
-                    'keep_top': data_sheet.get('keep_top', ''),
-                    'special_imput_cols': str(data_sheet.get('special_impute_cols', '')),
-                    'impute_cat': data_sheet.get('impute_cat', ''),
-                    'autofeat': data_sheet.get('autofeat', ''),
-                    'dimreduc': data_sheet.get('dimreduc', ''),
-                    'feature_selector': data_sheet.get('feature_selector', ''),
-                    'drop_cols': data_sheet.get('drop_cols', ''),
-                    'custom_begin_funcs': data_sheet.get('custom_begin_funcs', ''),
-                    'custom_end_funcs': data_sheet.get('custom_end_funcs', ''),
-                    'runname': run,
-                    'endtime': runs[run].get('endtime', ''),
-                    'search_type': runs[run].get('search_type', ''),
-                    'search_time': runs[run].get('search_time', ''),
-                    'eval_metric': runs[run].get('eval_metric', ''),
-                    'val_score': runs[run].get('val_score', ''),
-                })
+            res.append({
+                'data_id': data_id,
+                'config_summary': config_summary,
+                'num_indicator': data_sheet.get('num_indicator', ''),
+                'num_imputer': data_sheet.get('num_imputer', ''),
+                'cat_encoder': data_sheet.get('cat_encoder', ''),
+                'keep_top': data_sheet.get('keep_top', ''),
+                'special_imput_cols': str(data_sheet.get('special_impute_cols', '')),
+                'impute_cat': data_sheet.get('impute_cat', ''),
+                'autofeat': data_sheet.get('autofeat', ''),
+                'dimreduc': data_sheet.get('dimreduc', ''),
+                'feature_selector': data_sheet.get('feature_selector', ''),
+                'drop_cols': data_sheet.get('drop_cols', ''),
+                'custom_begin_funcs': data_sheet.get('custom_begin_funcs', ''),
+                'custom_end_funcs': data_sheet.get('custom_end_funcs', ''),
+            })
 
     df = pd.DataFrame(res)
     if df.shape[0] > 0:
-        df = df.sort_values('val_score', ascending=False)
         print(df.head())
         print(df.shape)
         df.to_csv(output_file, index=False)
@@ -91,10 +81,10 @@ def main():
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
     
-    summarize("pump/data", "pump/results.csv")
-    summarize("h1n1/data", "h1n1/results.csv")
-    summarize("seasonal/data", "seasonal/results.csv")
-    summarize("earthquake/data", "earthquake/results.csv")
+    summarize("pump/data", "pump/data_sheets.csv")
+    summarize("h1n1/data", "h1n1/data_sheets.csv")
+    summarize("seasonal/data", "seasonal/data_sheets.csv")
+    summarize("earthquake/data", "earthquake/data_sheets.csv")
    
 
 if __name__ == "__main__":

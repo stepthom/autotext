@@ -2,6 +2,16 @@ data/
 out*/
 catboost*/
 *MAC*/
+slurm-*.out
+AutoML_*/
+AutogluonModels/
+Untitled*.ipynb
+settings_*.json
+logs
+flaml_env_slurm/
+flaml_env/
+mljar_env/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

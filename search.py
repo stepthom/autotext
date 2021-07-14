@@ -57,8 +57,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-d', '--data-sheet', default=None)
     parser.add_argument('-c', '--competition', default='pump')
+    parser.add_argument('-s', '--search-time', type=int, default=5000)
+    parser.add_argument('-r', '--run-at-most', type=int, default=100)
     
     args = parser.parse_args()
+    
+    search_type = "FLAML"
+    search_time = args.search_time
     
     if args.competition == "pump":
         target_col = "status_group"
@@ -102,7 +107,7 @@ def main():
         print("DEBUG: Found {} data sheets.".format(len(data_sheet_files)))
     
         
-    def run_data_sheet(data_sheet, target_col, id_col, data_dir, out_dir, eval_metric): 
+    def run_data_sheet(data_sheet, target_col, id_col, data_dir, out_dir, eval_metric, search_time, search_type): 
         
         data_id = data_sheet.get('data_id', None)
         config_summary = data_sheet.get('config_summary', None)
@@ -112,23 +117,6 @@ def main():
         print("DEBUG: Running data_id {}".format(data_id))
         print("DEBUG: Running config_summary {}".format(config_summary))
         
-        search_time = 1000
-        search_type = "FLAML"
-        
-        # Check if we even need to run this
-        runs = data_sheet.get('runs', {})
-        for run in runs:
-            if (runs[run].get('search_type', '') == search_type and 
-                runs[run].get('search_time', 0) == search_time and
-                runs[run].get('eval_metric', '') == eval_metric):
-                print("Early stopping. Run already completed for data sheet. Skipping.")
-                return data_sheet
-            
-        # Tmp hack because of FLAML bug #130
-        cat_enc = data_sheet.get('cat_encoder', '')
-        if cat_enc == "None":
-            print("Skipping this data sheet because cat_encoder is None and FLAML bug #130. Skipping.")
-            return data_sheet
         
         # This structure will hold all the results and will be dumped to disk.
         run = {}
@@ -165,9 +153,9 @@ def main():
             "time_budget": search_time,
             "task": 'classification',
             "log_file_name": "{}/flaml-{}.log".format(out_dir, runname),
-            "n_jobs": 5,
+            "n_jobs": 8,
             "estimator_list": ['lgbm', 'xgboost', 'rf', 'extra_tree', 'catboost'],
-            "model_history": True,
+            "model_history": False,
             "eval_method": "cv",
             "n_splits": 3,
             "metric": eval_metric,
@@ -221,13 +209,35 @@ def main():
         
         return data_sheet
     
-    
+
+    run_so_far = 0
     for data_sheet_file in data_sheet_files:
         data_sheet = {}
         with open(data_sheet_file) as f:
             data_sheet = json.load(f)
+        
+        # Check if we even need to run this
+        runs = data_sheet.get('runs', {})
+        for run in runs:
+            if (runs[run].get('search_type', '') == search_type and 
+                runs[run].get('search_time', 0) == search_time and
+                runs[run].get('eval_metric', '') == eval_metric):
+                print("Run already completed for data sheet. Skipping.")
+                continue
             
-        data_sheet = run_data_sheet(data_sheet, target_col, id_col, data_dir, out_dir, eval_metric)
+        # Tmp hack because of FLAML bug #130
+        cat_enc = data_sheet.get('cat_encoder', '')
+        if cat_enc == "None":
+            print("Skipping this data sheet because cat_encoder is None and FLAML bug #130. Skipping.")
+            continue
+            
+        run_so_far = run_so_far + 1
+        if run_so_far > args.run_at_most:
+            print("Already ran {} of {} runs allotted. Ending.".format(run_so_far, args.run_at_most))
+            break
+            
+        print("Running run {} of {} runs allotted.".format(run_so_far, args.run_at_most))
+        data_sheet = run_data_sheet(data_sheet, target_col, id_col, data_dir, out_dir, eval_metric, search_time, search_type)
         dump_json(data_sheet_file, data_sheet)
 
 if __name__ == "__main__":
