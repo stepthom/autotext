@@ -16,4 +16,8 @@ pump/out  # Holds results of training runs (i.e., JSON log, and prediction/proba
 
 `slurm_*.sh` will submit a `run_parallel.py` to tthe Frontenac compute cluster.
 
+`summarize.py` will look for all rrun files and summarize them into a dataframe, and output `results.csv` files.
+
+`soft_voting.py` will look at the `results.csv` file and take the top N results and combine them via soft voting.
+
 Python's `venv` is useful for manageing packages. All required packages for FLAML are in `flaml_env` or `flaml_env_slurm`

@@ -75,7 +75,7 @@ def main():
         json_fn = os.path.join(out_dir, "combined-{}.json".format(runname))
         dump_json(json_fn, combined)
         
-        return
+        return out_fn, runname
     
     ##########################
     # H1N1
@@ -89,7 +89,7 @@ def main():
     # Another way is to manually list them 
     #probas_fns = []
    
-    combine_and_write(
+    h1n1_out_fn, h1n1_runname = combine_and_write(
         probas_fns,
         "h1n1/out", 
         "respondent_id", 
@@ -110,7 +110,7 @@ def main():
     # Another way is to manually list them 
     #probas_fns = []
    
-    combine_and_write(
+    seasonal_out_fn, seasonal_runname = combine_and_write(
         probas_fns,
         "seasonal/out", 
         "respondent_id", 
@@ -118,6 +118,28 @@ def main():
         classes= ["0", "1"],
         make_preds = False
     )
+    
+    #################################
+    # Now combine H1N1 and Seasonal
+    #################################
+
+    h1n1_df = pd.read_csv(h1n1_out_fn)
+    seasonal_df = pd.read_csv(seasonal_out_fn)
+
+    assert(h1n1_df['respondent_id'].equals(seasonal_df['respondent_id']))
+
+    vaccine_df = pd.DataFrame(
+        {'respondent_id': h1n1_df['respondent_id'], 
+         'h1n1_vaccine': h1n1_df['h1n1_vaccine'], 
+         'seasonal_vaccine': seasonal_df['seasonal_vaccine']
+        })
+    
+    print(vaccine_df.head())
+    
+    new_fn = "{}_{}_vaccine-combined-preds.csv".format(h1n1_runname, seasonal_runname)
+    print("Writing vaccine combined filename: {}".format(new_fn))
+    vaccine_df.to_csv("vaccine/out/{}".format(new_fn), index=False)
+    
     
     
     ##########################
@@ -132,7 +154,7 @@ def main():
     # Another way is to manually list them 
     #probas_fns = []
    
-    combine_and_write(
+    _, _ =  combine_and_write(
         probas_fns,
         "pump/out", 
         "id", 
@@ -153,7 +175,7 @@ def main():
     # Another way is to manually list them 
     #probas_fns = []
    
-    combine_and_write(
+    _, _ = combine_and_write(
         probas_fns,
         "earthquake/out", 
         "building_id", 

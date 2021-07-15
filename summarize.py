@@ -55,7 +55,11 @@ def summarize(dir, output_file):
             comp_settings = run.get('comp_settings', None)
 
             res.append({
+                'run_file': run_file,
+                'runname': run.get('runname', ''),
                 'data_id': data_id,
+                'preds_fn': run.get('preds_fn', ''),
+                'probas_fn': run.get('probas_fn', ''),
                 'config_summary': config_summary,
                 'num_indicator': data_sheet.get('num_indicator', ''),
                 'num_imputer': data_sheet.get('num_imputer', ''),
@@ -69,7 +73,6 @@ def summarize(dir, output_file):
                 'drop_cols': data_sheet.get('drop_cols', ''),
                 'custom_begin_funcs': data_sheet.get('custom_begin_funcs', ''),
                 'custom_end_funcs': data_sheet.get('custom_end_funcs', ''),
-                'runname': run.get('runname', ''),
                 'endtime': run.get('endtime', ''),
                 'search_type': comp_settings.get('search_type', ''),
                 'search_time': comp_settings.get('search_time', ''),

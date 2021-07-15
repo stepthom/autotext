@@ -1,6 +1,6 @@
 {
     "pump": {
-       "search_time": 31,
+       "search_time": 200,
        "search_type": "FLAML",
        "ensemble": false,
        "target_col": "status_group",
