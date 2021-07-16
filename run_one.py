@@ -28,7 +28,6 @@ import jsonpickle
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-from flaml import AutoML
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -168,29 +167,73 @@ def main():
     print("DEBUG: Reading testing data {}".format(test_fn))
     test_df = pd.read_csv(test_fn)
     X_test = test_df.drop([id_col], axis=1)
-
-    pipe = AutoML()
-    automl_settings = {
-        "time_budget": search_time,
-        "task": 'classification',
-        "log_file_name": "{}/flaml-{}.log".format(out_dir, runname),
-        "n_jobs": 8,
-        "estimator_list": ['lgbm', 'xgboost', 'rf', 'extra_tree', 'catboost'],
-        "model_history": False,
-        "eval_method": "cv",
-        "n_splits": 3,
-        "metric": eval_metric,
-        "log_training_metric": True,
-        "verbose": 1,
-        "ensemble": ensemble,
-    }
+    
+    pipe = None
+    automl_settings = {}
     starttime = str(datetime.datetime.now())
-    pipe.fit(X_train, y_train, **automl_settings)
-    val_score = 1-pipe.best_loss
+    val_score = 0
+    if search_type == "FLAML":
+        from flaml import AutoML
+        automl_settings = {
+            "time_budget": search_time,
+            "task": 'classification',
+            "log_file_name": "logs/flaml-{}.log".format(runname),
+            "n_jobs": 8,
+            "estimator_list": ['lgbm', 'xgboost', 'rf', 'extra_tree', 'catboost'],
+            "model_history": False,
+            "eval_method": "cv",
+            "n_splits": 3,
+            "metric": eval_metric,
+            "log_training_metric": True,
+            "verbose": 1,
+            "ensemble": ensemble,
+        }
+        pipe = AutoML()
+        pipe.fit(X_train, y_train, **automl_settings)
+        val_score = 1-pipe.best_loss
+        
+    elif search_type == "autogluon":
+        from autogluon.tabular import TabularDataset, TabularPredictor
+        
+        _df = X_train.copy()
+        _df[target] = y_train
+        
+        excluded_model_types = ['KNN', 'NN']
+        pipe = TabularPredictor(label=target, eval_metric=eval_metric)
+
+        pipe.fit(_df, time_limit=search_time, presets="best_quality", excluded_model_types=excluded_model_types)
+       
+        leaderboard_df = pipe.leaderboard()
+        print(leaderboard_df.head())
+        val_score = leaderboard.head(1)['score_val'].item()
+        
+    elif search_type == "mljar":
+        from supervised.automl import AutoML # mljar-supervised
+        
+        automl_settings = {
+            "mode": "Compete",
+            "model_time_limit": search_time,
+            "eval_metric": eval_metric,
+            "stack_models": True,
+            "explain_level": 0,
+            "features_selection": False,
+            "algorithms": ["Linear", "Decision Tree", "Random Forest", "LightGBM", "Xgboost", "CatBoost", "Neural Network"],
+            "golden_features": True,
+            "results_path": "logs/{}".format(runname),
+            "n_jobs": 8,
+            "verbose": 1,
+        }
+        
+        pipe = AutoML(**automl_settings)
+        pipe.fit(X_train, y_train)
+        
+        # TODO: get val_score somehow
+        
+    
     endtime = str(datetime.datetime.now())
+    
     print("run_one: val score: {}".format(val_score))
    
-
     preds = pipe.predict(X_test)
     preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
     preds_fn = os.path.join(out_dir, "{}-{}-preds.csv".format(data_id, runname))

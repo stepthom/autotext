@@ -19,7 +19,7 @@ def dump_json(fn, json_obj):
             return obj.toJSON()
         except:
             return obj.__dict__
-        
+
     print("DEBUG: Writing json file {}".format(fn))
     with open(fn, 'w') as fp:
         json.dump(json_obj, fp, indent=4, cls=NumpyEncoder)
@@ -38,7 +38,7 @@ def summarize(dir, output_file):
     for run_file in run_files:
         run = {}
         with open(run_file) as f:
-            
+
             try:
                 run = json.load(f)
             except:
@@ -53,6 +53,10 @@ def summarize(dir, output_file):
 
             config_summary = data_sheet.get('config_summary', None)
             comp_settings = run.get('comp_settings', None)
+            val_score = run.get('val_score', 0)
+            eval_metric = comp_settings.get('eval_metric', '')
+            if eval_metric == "log_loss":
+                val_score = 1 - val_score
 
             res.append({
                 'run_file': run_file,
@@ -78,28 +82,29 @@ def summarize(dir, output_file):
                 'search_time': comp_settings.get('search_time', ''),
                 'eval_metric': comp_settings.get('eval_metric', ''),
                 'ensemble': comp_settings.get('ensemble', ''),
-                'val_score': run.get('val_score', ''),
+                'best_estimator': run.get('best_estimator', ''),
+                'val_score': val_score
             })
 
     df = pd.DataFrame(res)
     if df.shape[0] > 0:
         df = df.sort_values('val_score', ascending=False)
-        print(df.head())
+        print(df[['runname', 'endtime', 'search_type', 'search_time', 'eval_metric', 'ensemble', 'best_estimator', 'val_score']].head())
         print(df.shape)
         df.to_csv(output_file, index=False)
         print("DEBUG: Wrote results file: {}".format(output_file))
     return
 
 
-def main():    
+def main():
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
-    
+
     summarize("pump/out", "pump/results.csv")
     summarize("h1n1/out", "h1n1/results.csv")
     summarize("seasonal/out", "seasonal/results.csv")
     summarize("earthquake/out", "earthquake/results.csv")
-   
+
 
 if __name__ == "__main__":
     main()
