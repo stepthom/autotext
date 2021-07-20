@@ -89,8 +89,9 @@ def summarize(dir, output_file):
     df = pd.DataFrame(res)
     if df.shape[0] > 0:
         df = df.sort_values('val_score', ascending=False)
-        print(df[['runname', 'endtime', 'search_type', 'search_time', 'eval_metric', 'ensemble', 'best_estimator', 'val_score']].head())
+        df = df.drop_duplicates(subset = ['data_id', 'search_type', 'search_time', 'eval_metric', 'ensemble', 'best_estimator', 'val_score'])
         print(df.shape)
+        print(df[['runname', 'endtime', 'search_type', 'search_time', 'eval_metric', 'ensemble', 'best_estimator', 'val_score']].head())
         df.to_csv(output_file, index=False)
         print("DEBUG: Wrote results file: {}".format(output_file))
     return

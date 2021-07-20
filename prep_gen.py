@@ -12,6 +12,7 @@ from itertools import product
 from autofeat import AutoFeatRegressor, AutoFeatClassifier, AutoFeatLight
 
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, FunctionTransformer, OrdinalEncoder
+from sklearn.preprocessing import KBinsDiscretizer
 from sklearn.decomposition import KernelPCA
 from sklearn.feature_selection import SelectFromModel
 from sklearn.ensemble import ExtraTreesClassifier
@@ -136,6 +137,41 @@ def pump_regionmeans_func(df, train=False):
     
     return df
 
+######################################
+# Custom functions for earthquake
+#######################################
+def earthquake_custom_features_func(df, train=False):
+    
+    from scipy.stats import zscore
+    
+    def is_binary(series):
+        series.dropna(inplace=True)
+        return series.nunique() <= 2
+    
+    float_cols = [col for col in df if (is_numeric_dtype(df[col]) and not is_binary(df[col]) and col != "building_id")]
+    print("DEBUG: earthquake_custom_features: float_cols: {}".format(float_cols))
+   
+    for col in float_cols:
+        # Get zscore
+        df['{}_zscore'.format(col)] = zscore(df[col])
+        
+        # Apply log, but first clip neg numbers to 1, and then add 1
+        df['{}_log'.format(col)] = np.log(np.clip(df[col]+1, 1, None))
+        
+    
+    # Static var
+    if train and not hasattr(earthquake_custom_features_func, "kbins"):
+        earthquake_custom_features_func.kbins = KBinsDiscretizer(n_bins=20, encode='ordinal', strategy='quantile')
+        earthquake_custom_features_func.kbins = earthquake_custom_features_func.kbins.fit(df[float_cols]) 
+        
+        
+    _new_cols = earthquake_custom_features_func.kbins.transform(df[float_cols])
+    if not isinstance(_new_cols, pd.DataFrame):
+        _new_cols = pd.DataFrame(_new_cols, columns=["{}_kbins".format(c) for c in float_cols])
+    df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
+        
+    return df
+
 
 ###############################################
 # The main preprocessing function
@@ -183,8 +219,13 @@ def hack(X, y=None,
     ##################################################
     # Gather data types
     ##################################################
+    def is_binary(series):
+        series.dropna(inplace=True)
+        return series.nunique() <= 2
+    
     cat_cols = []
     num_cols = []
+    float_cols = []
     for c in df.columns:
         if c == id_col:
             continue
@@ -194,10 +235,15 @@ def hack(X, y=None,
         elif is_numeric_dtype(df[c]):
             num_cols.append(c)
             
+        if is_numeric_dtype(df[c]) and not is_binary(df[c]):
+            float_cols.append(c)
+            
     msgs.append('Cat cols: {}'.format(cat_cols))
     msgs.append('Num cols: {}'.format(num_cols))
+    msgs.append('Float cols: {}'.format(float_cols))
     print("DEBUG: Cat cols: {}".format(cat_cols))
     print("DEBUG: Num cols: {}".format(num_cols))
+    print("DEBUG: Float cols: {}".format(float_cols))
     
     all_cols = cat_cols + num_cols
     
@@ -214,6 +260,7 @@ def hack(X, y=None,
         _new_cols = num_indicator.transform(df[num_cols])
         if not isinstance(_new_cols, pd.DataFrame):
             _new_cols = pd.DataFrame(_new_cols, columns=["missing_{}".format(c) for c in num_cols])
+        print("DEBUG: hack: adding {} cols for missing values".format(_new_cols.shape[1]))
         df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
     
     
@@ -250,6 +297,41 @@ def hack(X, y=None,
     for f in custom_end_funcs:
         print("DEBUG: calling custom end function {}".format(f))
         df = f(df, train)
+        
+        
+    ##################################################
+    # Google-Auto ML-esq features
+    ##################################################
+    print("DEBUG: hack: scaler/log/kbins on float cols: {}".format(float_cols))
+    def my_log(x):
+        return np.log(np.clip(x, 1, None))
+    
+    if train and not hasattr(hack, "scaler"):
+        hack.scaler = StandardScaler()
+        hack.scaler = hack.scaler.fit(df[float_cols])
+        
+    if train and not hasattr(hack, "log"):
+        hack.log = FunctionTransformer(my_log)
+        #hack.log = hack.log.fit(df[float_cols])
+        
+    if train and not hasattr(hack, "kbins"):
+        hack.kbins = KBinsDiscretizer(n_bins=20, encode='ordinal', strategy='quantile')
+        hack.kbins = hack.kbins.fit(df[float_cols])
+        
+    _new_cols = hack.scaler.transform(df[float_cols])
+    _new_cols = pd.DataFrame(_new_cols, columns=["{}_scaler".format(c) for c in float_cols])
+    df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
+    
+    _new_cols = hack.log.transform(df[float_cols])
+    _new_cols = _new_cols.add_suffix("_log")
+    #_new_cols = pd.DataFrame(_new_cols, columns=["{}_log".format(c) for c in float_cols])
+    #print(_new_cols)
+    df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
+   
+    _new_cols = hack.kbins.transform(df[float_cols])
+    _new_cols = pd.DataFrame(_new_cols, columns=["{}_kbins".format(c) for c in float_cols])
+    df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
+        
 
     ##################################################
     # Categorical Smushing
@@ -404,7 +486,7 @@ def main():
     
     num_indicators = [
        MissingIndicator(features="all"),
-       None,
+       #None,
     ]
     
     num_imputers = [
@@ -412,7 +494,7 @@ def main():
     ]
 
     cat_encoders = [
-        ce.wrapper.PolynomialWrapper(ce.cat_boost.CatBoostEncoder(handle_unknown="value", sigma=None)),
+        #ce.wrapper.PolynomialWrapper(ce.cat_boost.CatBoostEncoder(handle_unknown="value", sigma=None)),
         OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
         ce.wrapper.PolynomialWrapper(ce.m_estimate.MEstimateEncoder(randomized=False, verbose=0)),
     ]
@@ -423,19 +505,19 @@ def main():
     
     autofeats = [
         None,
-        AutoFeatLight(verbose=1, compute_ratio=False, compute_product=True, scale=False),
+        #AutoFeatLight(verbose=1, compute_ratio=False, compute_product=True, scale=False),
     ]
                                               
     dimreducs = [
         KernelPCA(n_components=20, kernel='rbf', n_jobs=10, eigen_solver="arpack", max_iter=500),
-        KernelPCA(n_components=20, kernel='poly', n_jobs=10, eigen_solver="arpack", max_iter=500),
-        KernelPCA(n_components=20, kernel='sigmoid', n_jobs=10, eigen_solver='arpack', max_iter=500),
+        #KernelPCA(n_components=20, kernel='poly', n_jobs=10, eigen_solver="arpack", max_iter=500),
+        #KernelPCA(n_components=20, kernel='sigmoid', n_jobs=10, eigen_solver='arpack', max_iter=500),
         None,
         TruncatedSVD(n_components=20, n_iter=5, random_state=42),
     ]
     
     feature_selectors = [
-        SelectFromModel(estimator=ExtraTreesClassifier(n_estimators=100, random_state=42), threshold=-np.inf, max_features=25),
+        #SelectFromModel(estimator=ExtraTreesClassifier(n_estimators=100, random_state=42), threshold=-np.inf, max_features=25),
         None,
     ]
     
@@ -449,18 +531,18 @@ def main():
        
         drop_colss =  [
             None, 
-            ['recorded_by', 'num_private', 'scheme_name', 'payment_type', 
-             'quantity_group', 'source_type', 'waterpoint_type_group']
+            #['recorded_by', 'num_private', 'scheme_name', 'payment_type', 
+             #'quantity_group', 'source_type', 'waterpoint_type_group']
         ]
         custom_begin_funcss = [[pump_datatype_func, pump_weirdvals_func]]
         custom_end_funcss = [[pump_date_func, pump_latlong_func, pump_regionmeans_func]]
-        keep_tops = [25, 75, 200]
+        keep_tops = [25, 200]
         dimreducs = [
-            KernelPCA(n_components=5, kernel='rbf', n_jobs=10, eigen_solver="arpack", max_iter=500),
-            KernelPCA(n_components=5, kernel='poly', n_jobs=10, eigen_solver="arpack", max_iter=500),
-            KernelPCA(n_components=5, kernel='sigmoid', n_jobs=10, eigen_solver='arpack', max_iter=500),
-            None,
-            TruncatedSVD(n_components=5, n_iter=5, random_state=42),
+            KernelPCA(n_components=15, kernel='rbf', n_jobs=10, eigen_solver="arpack", max_iter=500),
+            #KernelPCA(n_components=5, kernel='poly', n_jobs=10, eigen_solver="arpack", max_iter=500),
+            #KernelPCA(n_components=5, kernel='sigmoid', n_jobs=10, eigen_solver='arpack', max_iter=500),
+            #None,
+            #TruncatedSVD(n_components=5, n_iter=5, random_state=42),
         ]
         
     elif args.competition.startswith("h"):
@@ -483,10 +565,26 @@ def main():
         id_col = "building_id"
         out_dir = "earthquake/out"
         
+        num_indicators = [
+           MissingIndicator(features="all"),
+        ]
+        
+        cat_encoders = [
+            #ce.wrapper.PolynomialWrapper(ce.cat_boost.CatBoostEncoder(handle_unknown="value", sigma=None)),
+            #OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
+            None
+        ]
+        
+        #custom_end_funcss = [[earthquake_custom_features_func]]
+        
         dimreducs = [
             None,
-            TruncatedSVD(n_components=25, n_iter=5, random_state=42),
+            #TruncatedSVD(n_components=25, n_iter=5, random_state=42),
         ]
+        
+        autofeats = [ None ]
+                                              
+        feature_selectors = [ None ]
     else:
         print("Error: unknown competition type: {}".format(args.competition))
         return
