@@ -153,7 +153,7 @@ def main():
     if False:
 
         # One way is to just get the top N results from the results file
-        num_top = 30
+        num_top = 15
         results = pd.read_csv("pump/results.csv").head(num_top)
         probas_fns = list(results['probas_fn'])
 

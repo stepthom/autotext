@@ -230,12 +230,12 @@ def hack(X, y=None,
         if c == id_col:
             continue
         col_type = df[c].dtype
-        if col_type == 'object' or col_type.name == 'category':
+        if col_type == 'object' or col_type.name == 'category' in c:
             cat_cols.append(c)
         elif is_numeric_dtype(df[c]):
             num_cols.append(c)
             
-        if is_numeric_dtype(df[c]) and not is_binary(df[c]):
+        if is_numeric_dtype(df[c]) and not is_binary(df[c]) and c not in cat_cols:
             float_cols.append(c)
             
     msgs.append('Cat cols: {}'.format(cat_cols))
@@ -312,25 +312,27 @@ def hack(X, y=None,
         
     if train and not hasattr(hack, "log"):
         hack.log = FunctionTransformer(my_log)
-        #hack.log = hack.log.fit(df[float_cols])
+        hack.log = hack.log.fit(df[float_cols])
         
     if train and not hasattr(hack, "kbins"):
         hack.kbins = KBinsDiscretizer(n_bins=20, encode='ordinal', strategy='quantile')
         hack.kbins = hack.kbins.fit(df[float_cols])
         
-    _new_cols = hack.scaler.transform(df[float_cols])
-    _new_cols = pd.DataFrame(_new_cols, columns=["{}_scaler".format(c) for c in float_cols])
-    df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
-    
-    _new_cols = hack.log.transform(df[float_cols])
-    _new_cols = _new_cols.add_suffix("_log")
-    #_new_cols = pd.DataFrame(_new_cols, columns=["{}_log".format(c) for c in float_cols])
-    #print(_new_cols)
-    df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
-   
-    _new_cols = hack.kbins.transform(df[float_cols])
-    _new_cols = pd.DataFrame(_new_cols, columns=["{}_kbins".format(c) for c in float_cols])
-    df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
+    if True:
+        
+        _new_cols = hack.scaler.transform(df[float_cols])
+        _new_cols = pd.DataFrame(_new_cols, columns=["{}_scaler".format(c) for c in float_cols])
+        df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
+
+        _new_cols = hack.log.transform(df[float_cols])
+        _new_cols = _new_cols.add_suffix("_log")
+        #_new_cols = pd.DataFrame(_new_cols, columns=["{}_log".format(c) for c in float_cols])
+        #print(_new_cols)
+        df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
+
+        _new_cols = hack.kbins.transform(df[float_cols])
+        _new_cols = pd.DataFrame(_new_cols, columns=["{}_kbins".format(c) for c in float_cols])
+        df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
         
 
     ##################################################
@@ -494,7 +496,7 @@ def main():
     ]
 
     cat_encoders = [
-        #ce.wrapper.PolynomialWrapper(ce.cat_boost.CatBoostEncoder(handle_unknown="value", sigma=None)),
+        ce.wrapper.PolynomialWrapper(ce.cat_boost.CatBoostEncoder(handle_unknown="value", sigma=None)),
         OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
         ce.wrapper.PolynomialWrapper(ce.m_estimate.MEstimateEncoder(randomized=False, verbose=0)),
     ]
@@ -558,24 +560,12 @@ def main():
         target_col = "seasonal_vaccine"
         id_col = "respondent_id"
     elif args.competition.startswith("e"):
-        train_input = "earthquake/earthquake_train.csv"
-        test_input = "earthquake/earthquake_test.csv"
+        train_input = "earthquake/earthquake_train_lvls.csv"
+        test_input = "earthquake/earthquake_test_lvls.csv"
         data_dir = "earthquake/data"
         target_col = "damage_grade"
         id_col = "building_id"
         out_dir = "earthquake/out"
-        
-        num_indicators = [
-           MissingIndicator(features="all"),
-        ]
-        
-        cat_encoders = [
-            #ce.wrapper.PolynomialWrapper(ce.cat_boost.CatBoostEncoder(handle_unknown="value", sigma=None)),
-            #OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
-            None
-        ]
-        
-        #custom_end_funcss = [[earthquake_custom_features_func]]
         
         dimreducs = [
             None,
@@ -584,14 +574,35 @@ def main():
         
         autofeats = [ None ]
                                               
-        feature_selectors = [ None ]
+        feature_selectors = [None,
+            SelectFromModel(estimator=ExtraTreesClassifier(n_estimators=100, random_state=42), threshold=-np.inf, max_features=25),
+        ]
+        
+        num_indicators = [None]
+        
     else:
         print("Error: unknown competition type: {}".format(args.competition))
         return
     
-    train_df= pd.read_csv(train_input)
-    test_df = pd.read_csv(test_input)
     
+    #geo_df = pd.read_csv('earthquake/geo.csv')
+    #print(geo_df.shape)
+    
+    train_df= pd.read_csv(train_input)
+    #print(train_df.shape)
+    N = train_df.shape[0]
+    
+    #train_df = pd.concat([train_df, geo_df.iloc[0:N,:].reset_index(drop=True)], axis=1, ignore_index=False)
+    #print(train_df.head())
+    #print(train_df.info())
+                          
+                          
+    test_df = pd.read_csv(test_input)
+    #print(test_df.shape)
+    #print(geo_df.iloc[N:,:].shape)
+    #print(geo_df.iloc[N:,:].head())
+    #test_df = pd.concat([test_df, geo_df.iloc[N:,:].reset_index(drop=True)], axis=1, ignore_index=False)
+    #print(test_df.head())
     
     all_combos = list(product(drop_colss, custom_begin_funcss, custom_end_funcss, 
                               num_indicators, num_imputers, 

@@ -32,7 +32,7 @@ def main():
         cmd = [
             "python", "run_seq.py", 
             "--competition", c_type, 
-            "--num-to-run", "20", 
+            "--num-to-run", "5", 
             "--run-settings", args.run_settings,
         ] 
         p = subprocess.Popen(cmd,
