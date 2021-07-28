@@ -1,8 +1,8 @@
 {
     "pump": {
-       "search_time": 8000,
+       "search_time": 10000,
        "search_type": "FLAML",
-       "ensemble": true,
+       "ensemble": false,
        "target_col": "status_group",
        "id_col": "id",
        "data_dir": "pump/data",
@@ -10,9 +10,9 @@
        "eval_metric": "accuracy"
     },
     "h1n1": {
-       "search_time": 8000,
+       "search_time": 10000,
        "search_type": "FLAML",
-       "ensemble": true,
+       "ensemble": false,
        "target_col": "h1n1_vaccine",
        "id_col": "respondent_id",
        "data_dir": "h1n1/data",
@@ -20,9 +20,9 @@
        "eval_metric": "roc_auc"
     },
     "seasonal": {
-       "search_time": 8000,
+       "search_time": 10000,
        "search_type": "FLAML",
-       "ensemble": true,
+       "ensemble": false,
        "target_col": "seasonal_vaccine",
        "id_col": "respondent_id",
        "data_dir": "seasonal/data",
@@ -30,9 +30,9 @@
        "eval_metric": "roc_auc"
     },
     "earthquake": {
-       "search_time": 8000,
+       "search_time": 10000,
        "search_type": "FLAML",
-       "ensemble": true,
+       "ensemble": false,
        "target_col": "damage_grade",
        "id_col": "building_id",
        "data_dir": "earthquake/data",

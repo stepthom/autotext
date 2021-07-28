@@ -236,7 +236,7 @@ def main():
    
     preds = pipe.predict(X_test)
     preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
-    preds_fn = os.path.join(out_dir, "{}-{}-preds.csv".format(data_id, runname))
+    preds_fn = os.path.join(out_dir, "{}-{}-preds.csv".format(runname, data_id))
     preds_df.to_csv(preds_fn, index=False)
     print("run_one: Wrote preds file: {}".format(preds_fn))
 
@@ -247,7 +247,7 @@ def main():
     probas_df = pd.DataFrame(probas, columns=columns)
     probas_df[id_col] = test_df[id_col]
     probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
-    probas_fn = os.path.join(out_dir, "{}-{}-probas.csv".format(data_id, runname))
+    probas_fn = os.path.join(out_dir, "{}-{}-probas.csv".format(runname, data_id))
     probas_df.to_csv(probas_fn, index=False)
     print("run_one: Wrote probas file: {}".format(probas_fn))
 

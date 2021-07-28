@@ -14,13 +14,15 @@ from autofeat import AutoFeatRegressor, AutoFeatClassifier, AutoFeatLight
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, FunctionTransformer, OrdinalEncoder
 from sklearn.preprocessing import KBinsDiscretizer
 from sklearn.decomposition import KernelPCA
-from sklearn.feature_selection import SelectFromModel
-from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.feature_selection import SelectFromModel, RFECV
+from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor, RandomForestClassifier
 from sklearn.decomposition import TruncatedSVD
 from sklearn.model_selection import train_test_split
-
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer
 from sklearn.impute import SimpleImputer, MissingIndicator
 from pandas.api.types import is_numeric_dtype
+from sklearn.model_selection import StratifiedKFold
 
 import category_encoders as ce
 from category_encoders.wrapper import PolynomialWrapper
@@ -36,9 +38,12 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 
 def add_datetime(X, column):
     tmp_dt = X[column].dt
-    new_columns_dict = {f'year_{column}': tmp_dt.year, f'month_{column}': tmp_dt.month,
-                        f'day_{column}': tmp_dt.day, f'hour_{column}': tmp_dt.hour,
-                        f'minute_{column}': tmp_dt.minute, f'second_{column}': tmp_dt.second,
+    new_columns_dict = {f'year_{column}': tmp_dt.year, 
+                        f'month_{column}': tmp_dt.month,
+                        f'day_{column}': tmp_dt.day, 
+                        #f'hour_{column}': tmp_dt.hour,
+                        #f'minute_{column}': tmp_dt.minute, 
+                        #f'second_{column}': tmp_dt.second,
                         f'dayofweek_{column}': tmp_dt.dayofweek,
                         f'dayofyear_{column}': tmp_dt.dayofyear,
                         f'quarter_{column}': tmp_dt.quarter}
@@ -78,8 +83,9 @@ def pump_datatype_func(df, train=False):
 def pump_date_func(df, train=False):
     df = add_datetime(df, 'date_recorded')
     baseline = pd.datetime(2014, 1, 1)
-    df['date_recorded_since'] = (baseline - df['date_recorded']).dt.days
-    df['timediff'] = df['year_date_recorded'] - df['construction_year']
+    df['timediff1'] = (baseline - df['date_recorded']).dt.days
+    df['timediff2'] = df['year_date_recorded'] - df['construction_year']
+    df['timediff3'] = (baseline.year - df['construction_year'])
     df = df.drop(['date_recorded'], axis=1)
     return df
 
@@ -88,10 +94,16 @@ def pump_latlong_func(df, train=False):
     mwanza = (-2.516667, 32.9)
     arusha = (-3.366667, 36.683333)
     dodoma = (-6.173056, 35.741944)
+    mbeya = (-8.909401, 33.4608)
+    kigoma = (-4.893941, 29.673386)
+    arusha = (-3.386925, 36.682995)
     df['daressallam_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(daressalaam, (x[0], x[1])).km, axis=1)
     df['mwanza_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(mwanza, (x[0], x[1])).km, axis=1)
     df['arusha_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(arusha, (x[0], x[1])).km, axis=1)
     df['dodoma_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(dodoma, (x[0], x[1])).km, axis=1)
+    df['mbeya_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(dodoma, (x[0], x[1])).km, axis=1)
+    df['kigoma_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(dodoma, (x[0], x[1])).km, axis=1)
+    df['arusha_dist'] = df[['latitude', 'longitude']].apply(lambda x: geopy.distance.great_circle(dodoma, (x[0], x[1])).km, axis=1)
     return df
 
 def pump_weirdvals_func(df, train=False):
@@ -140,38 +152,30 @@ def pump_regionmeans_func(df, train=False):
 ######################################
 # Custom functions for earthquake
 #######################################
-def earthquake_custom_features_func(df, train=False):
+
+def earthquake_level_3_agg_func(df, train=False):
     
-    from scipy.stats import zscore
+    if train and not hasattr(earthquake_level_3_agg_func, "level_3_counts"):
+        earthquake_level_3_agg_func.level_3_counts = df.groupby('geo_level_3_id').agg({'geo_level_3_id': 'count'})
     
-    def is_binary(series):
-        series.dropna(inplace=True)
-        return series.nunique() <= 2
-    
-    float_cols = [col for col in df if (is_numeric_dtype(df[col]) and not is_binary(df[col]) and col != "building_id")]
-    print("DEBUG: earthquake_custom_features: float_cols: {}".format(float_cols))
-   
-    for col in float_cols:
-        # Get zscore
-        df['{}_zscore'.format(col)] = zscore(df[col])
+    def f(row, level_3_counts, min_num=10):
+        geo_level_2_id = row['geo_level_2_id']
+        geo_level_3_id = row['geo_level_3_id']
+        if geo_level_3_id not in level_3_counts.index or level_3_counts.loc[geo_level_3_id][0] < min_num:
+            return geo_level_2_id
+        else:
+            return geo_level_3_id
         
-        # Apply log, but first clip neg numbers to 1, and then add 1
-        df['{}_log'.format(col)] = np.log(np.clip(df[col]+1, 1, None))
-        
-    
-    # Static var
-    if train and not hasattr(earthquake_custom_features_func, "kbins"):
-        earthquake_custom_features_func.kbins = KBinsDiscretizer(n_bins=20, encode='ordinal', strategy='quantile')
-        earthquake_custom_features_func.kbins = earthquake_custom_features_func.kbins.fit(df[float_cols]) 
-        
-        
-    _new_cols = earthquake_custom_features_func.kbins.transform(df[float_cols])
-    if not isinstance(_new_cols, pd.DataFrame):
-        _new_cols = pd.DataFrame(_new_cols, columns=["{}_kbins".format(c) for c in float_cols])
-    df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
-        
+    df['geo_level_3_id'] = df.apply(f, args=(earthquake_level_3_agg_func.level_3_counts,), axis=1)
     return df
 
+def earthquake_datatype_12_func(df, train=False):
+    df[['geo_level_1_id', 'geo_level_2_id']] = df[['geo_level_1_id', 'geo_level_2_id']].astype('category')
+    return df
+    
+def earthquake_datatype_123_func(df, train=False):
+    df[['geo_level_1_id', 'geo_level_2_id','geo_level_3_id']] = df[['geo_level_1_id', 'geo_level_2_id', 'geo_level_3_id']].astype('category')
+    return df
 
 ###############################################
 # The main preprocessing function
@@ -230,7 +234,7 @@ def hack(X, y=None,
         if c == id_col:
             continue
         col_type = df[c].dtype
-        if col_type == 'object' or col_type.name == 'category' in c:
+        if col_type == 'object' or col_type.name == 'category':
             cat_cols.append(c)
         elif is_numeric_dtype(df[c]):
             num_cols.append(c)
@@ -267,15 +271,14 @@ def hack(X, y=None,
     ##################################################
     # Numeric: Impute missing  values
     ##################################################
-    print("DEBUG: hack: simple numeric imputing")
-    # Impute Missing Value
-    simple_impute_cols = num_cols
-                
-    msgs.append('Numeric simple imputing for cols: {}'.format(simple_impute_cols))
 
-    if train:
-        num_imputer = num_imputer.fit(df[simple_impute_cols], y)
-    df[simple_impute_cols] = num_imputer.transform(df[simple_impute_cols])
+    if num_imputer is not None:
+        print("DEBUG: hack: simple numeric imputing")
+        msgs.append('Numeric simple imputing for cols: {}'.format(simple_impute_cols))
+        simple_impute_cols = num_cols
+        if train:
+            num_imputer = num_imputer.fit(df[simple_impute_cols], y)
+        df[simple_impute_cols] = num_imputer.transform(df[simple_impute_cols])
 
     
     ##################################################
@@ -285,9 +288,12 @@ def hack(X, y=None,
     # Impute categorical? 
     # - If yes, use top value count
     # - If no, replace nan with special string "__NAN__"
-    print("DEBUG: hack: imputing categorical")
+    #print("DEBUG: hack: imputing categorical")
                 
     # TODO: not implemented yet
+    df[cat_cols] = df[cat_cols].astype('category')
+    for cat_col in cat_cols:
+        df[cat_col] = df[cat_col].cat.add_categories('__NAN__')
     df[cat_cols] = df[cat_cols].fillna('__NAN__')
     df[cat_cols] = df[cat_cols].astype('category')
     
@@ -302,23 +308,23 @@ def hack(X, y=None,
     ##################################################
     # Google-Auto ML-esq features
     ##################################################
-    print("DEBUG: hack: scaler/log/kbins on float cols: {}".format(float_cols))
-    def my_log(x):
-        return np.log(np.clip(x, 1, None))
+    if False:
+        print("DEBUG: hack: scaler/log/kbins on float cols: {}".format(float_cols))
+        def my_log(x):
+            return np.log(np.clip(x, 1, None))
     
-    if train and not hasattr(hack, "scaler"):
-        hack.scaler = StandardScaler()
-        hack.scaler = hack.scaler.fit(df[float_cols])
+        if train and not hasattr(hack, "scaler"):
+            hack.scaler = StandardScaler()
+            hack.scaler = hack.scaler.fit(df[float_cols])
+
+        if train and not hasattr(hack, "log"):
+            hack.log = FunctionTransformer(my_log)
+            hack.log = hack.log.fit(df[float_cols])
+
+        if train and not hasattr(hack, "kbins"):
+            hack.kbins = KBinsDiscretizer(n_bins=20, encode='ordinal', strategy='quantile')
+            hack.kbins = hack.kbins.fit(df[float_cols])
         
-    if train and not hasattr(hack, "log"):
-        hack.log = FunctionTransformer(my_log)
-        hack.log = hack.log.fit(df[float_cols])
-        
-    if train and not hasattr(hack, "kbins"):
-        hack.kbins = KBinsDiscretizer(n_bins=20, encode='ordinal', strategy='quantile')
-        hack.kbins = hack.kbins.fit(df[float_cols])
-        
-    if True:
         
         _new_cols = hack.scaler.transform(df[float_cols])
         _new_cols = pd.DataFrame(_new_cols, columns=["{}_scaler".format(c) for c in float_cols])
@@ -338,15 +344,16 @@ def hack(X, y=None,
     ##################################################
     # Categorical Smushing
     ##################################################
-      
-    # Categorical levels "smushing" - convert long-tail values to "__OTHER__"
-    df[cat_cols] = df[cat_cols].astype(str)
-    for c in cat_cols:
-        if train:
-            top_n_values[c] = get_top_n_values(df, c, n=keep_top)
-        df = keep_only(df, c, top_n_values[c])
-        
-    df[cat_cols] = df[cat_cols].astype('category')
+     
+    if keep_top is not None:
+        # Categorical levels "smushing" - convert long-tail values to "__OTHER__"
+        df[cat_cols] = df[cat_cols].astype(str)
+        for c in cat_cols:
+            if train:
+                top_n_values[c] = get_top_n_values(df, c, n=keep_top)
+            df = keep_only(df, c, top_n_values[c])
+
+        df[cat_cols] = df[cat_cols].astype('category')
     
     ##################################################
     # Categorical Encoding
@@ -362,12 +369,15 @@ def hack(X, y=None,
         df[cat_cols] = df[cat_cols].apply(lambda x: x.cat.codes)
     else:
         print("DEBUG: hack: encoding: encoder")
+        print("DEBUG: cols = {}".format(cat_cols))
         _new_cols = None
         if train:
-            _new_cols = enc.fit_transform(df[cat_cols], y)
-        else:
-            _new_cols = enc.transform(df[cat_cols])
+            print("DEBUG: hack: encoding: train")
+            enc.fit(df[cat_cols], y)
+        _new_cols = enc.transform(df[cat_cols])
+        print("DEBUG: hack: encoding: transform returned {}".format(_new_cols.shape))
         if not isinstance(_new_cols, pd.DataFrame):
+            print("here")
             _new_col_names =  ["{}_{}".format('enc_', i) for i in range(_new_cols.shape[1])]
             _new_cols = pd.DataFrame(_new_cols, columns=_new_col_names)
         df = pd.concat([df, _new_cols], axis=1, ignore_index=False)
@@ -488,17 +498,20 @@ def main():
     
     num_indicators = [
        MissingIndicator(features="all"),
-       #None,
+       None,
     ]
     
     num_imputers = [
        SimpleImputer(missing_values=np.nan, strategy="median"),
+       IterativeImputer(missing_values=np.nan, estimator=ExtraTreesRegressor(n_estimators=100, random_state=0)),
     ]
 
     cat_encoders = [
-        ce.wrapper.PolynomialWrapper(ce.cat_boost.CatBoostEncoder(handle_unknown="value", sigma=None)),
+        ce.wrapper.PolynomialWrapper(ce.james_stein.JamesSteinEncoder(handle_unknown="value", randomized=True)),
+        #ce.wrapper.PolynomialWrapper(ce.cat_boost.CatBoostEncoder(handle_unknown="value", sigma=None)),
         OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
         ce.wrapper.PolynomialWrapper(ce.m_estimate.MEstimateEncoder(randomized=False, verbose=0)),
+        ce.wrapper.PolynomialWrapper(ce.glmm.GLMMEncoder(random_state=4)),
     ]
     
     keep_tops = [25]
@@ -507,7 +520,7 @@ def main():
     
     autofeats = [
         None,
-        #AutoFeatLight(verbose=1, compute_ratio=False, compute_product=True, scale=False),
+        AutoFeatLight(verbose=1, compute_ratio=False, compute_product=True, scale=False),
     ]
                                               
     dimreducs = [
@@ -519,7 +532,8 @@ def main():
     ]
     
     feature_selectors = [
-        #SelectFromModel(estimator=ExtraTreesClassifier(n_estimators=100, random_state=42), threshold=-np.inf, max_features=25),
+        SelectFromModel(estimator=ExtraTreesClassifier(n_estimators=100, random_state=42), threshold=-np.inf, max_features=30),
+        RFECV(estimator=RandomForestClassifier(n_estimators=100, random_state=42), min_features_to_select=10, n_jobs=5),
         None,
     ]
     
@@ -538,13 +552,13 @@ def main():
         ]
         custom_begin_funcss = [[pump_datatype_func, pump_weirdvals_func]]
         custom_end_funcss = [[pump_date_func, pump_latlong_func, pump_regionmeans_func]]
-        keep_tops = [25, 200]
+        keep_tops = [100, 200, 300]
         dimreducs = [
-            KernelPCA(n_components=15, kernel='rbf', n_jobs=10, eigen_solver="arpack", max_iter=500),
+            #KernelPCA(n_components=15, kernel='rbf', n_jobs=10, eigen_solver="arpack", max_iter=500),
             #KernelPCA(n_components=5, kernel='poly', n_jobs=10, eigen_solver="arpack", max_iter=500),
             #KernelPCA(n_components=5, kernel='sigmoid', n_jobs=10, eigen_solver='arpack', max_iter=500),
-            #None,
-            #TruncatedSVD(n_components=5, n_iter=5, random_state=42),
+            None,
+            #TruncatedSVD(n_components=20, n_iter=5, random_state=42),
         ]
         
     elif args.competition.startswith("h"):
@@ -560,49 +574,54 @@ def main():
         target_col = "seasonal_vaccine"
         id_col = "respondent_id"
     elif args.competition.startswith("e"):
-        train_input = "earthquake/earthquake_train_lvls.csv"
-        test_input = "earthquake/earthquake_test_lvls.csv"
+        train_input = "earthquake/earthquake_train.csv"
+        test_input = "earthquake/earthquake_test.csv"
         data_dir = "earthquake/data"
         target_col = "damage_grade"
         id_col = "building_id"
         out_dir = "earthquake/out"
+
+        
+        custom_begin_funcss = [
+            [earthquake_level_3_agg_func, earthquake_datatype_123_func], 
+            [earthquake_datatype_12_func],
+        ]
+        
+        num_imputers = [None, ]
+        num_indicators = [ None, ]
+        keep_tops = [None]
         
         dimreducs = [
             None,
             #TruncatedSVD(n_components=25, n_iter=5, random_state=42),
         ]
         
-        autofeats = [ None ]
+        autofeats = [ 
+            None,
+            #AutoFeatLight(verbose=1, compute_ratio=False, compute_product=True, scale=False),
+        ]
                                               
-        feature_selectors = [None,
-            SelectFromModel(estimator=ExtraTreesClassifier(n_estimators=100, random_state=42), threshold=-np.inf, max_features=25),
+        feature_selectors = [
+            None,
+            #SelectFromModel(estimator=ExtraTreesClassifier(n_estimators=100, random_state=42), threshold=-np.inf, max_features=25),
         ]
         
-        num_indicators = [None]
+        cat_encoders = [
+            #ce.wrapper.PolynomialWrapper(ce.target_encoder.TargetEncoder(verbose=0, 
+                                                                         #handle_unknown='value', handle_missing='value', 
+                                                                         #min_samples_leaf=10, smoothing=0.1)),
+            #OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
+            #ce.wrapper.PolynomialWrapper(ce.m_estimate.MEstimateEncoder(randomized=True, verbose=0)),
+            ce.wrapper.PolynomialWrapper(ce.james_stein.JamesSteinEncoder(handle_unknown="value", randomized=True)),
+            #ce.wrapper.PolynomialWrapper(ce.glmm.GLMMEncoder(random_state=4)),
+        ]
         
     else:
         print("Error: unknown competition type: {}".format(args.competition))
         return
     
-    
-    #geo_df = pd.read_csv('earthquake/geo.csv')
-    #print(geo_df.shape)
-    
     train_df= pd.read_csv(train_input)
-    #print(train_df.shape)
-    N = train_df.shape[0]
-    
-    #train_df = pd.concat([train_df, geo_df.iloc[0:N,:].reset_index(drop=True)], axis=1, ignore_index=False)
-    #print(train_df.head())
-    #print(train_df.info())
-                          
-                          
     test_df = pd.read_csv(test_input)
-    #print(test_df.shape)
-    #print(geo_df.iloc[N:,:].shape)
-    #print(geo_df.iloc[N:,:].head())
-    #test_df = pd.concat([test_df, geo_df.iloc[N:,:].reset_index(drop=True)], axis=1, ignore_index=False)
-    #print(test_df.head())
     
     all_combos = list(product(drop_colss, custom_begin_funcss, custom_end_funcss, 
                               num_indicators, num_imputers, 

@@ -1,6 +1,6 @@
 {
     "pump": {
-       "search_time": 200,
+       "search_time": 100,
        "search_type": "FLAML",
        "ensemble": false,
        "target_col": "status_group",
@@ -30,9 +30,9 @@
        "eval_metric": "roc_auc"
     },
     "earthquake": {
-       "search_time": 100,
+       "search_time": 5000,
        "search_type": "FLAML",
-       "ensemble": true,
+       "ensemble": false,
        "target_col": "damage_grade",
        "id_col": "building_id",
        "data_dir": "earthquake/data",

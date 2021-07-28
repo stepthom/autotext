@@ -76,14 +76,18 @@ def main():
         dump_json(json_fn, combined)
 
         return out_fn, runname
+    
+    do_pump = False
+    do_vaccine = False
+    do_earthquake = True
 
     ##########################
     # H1N1
     ##########################
 
-    if False:
+    if do_vaccine:
         # One way is to just get the top N results from the results file
-        num_top = 15
+        num_top = 3
         results = pd.read_csv("h1n1/results.csv").head(num_top)
         probas_fns = list(results['probas_fn'])
 
@@ -103,9 +107,8 @@ def main():
     # Seasonal
     ##########################
 
-    if False:
         # One way is to just get the top N results from the results file
-        num_top = 15
+        num_top = 3
         results = pd.read_csv("seasonal/results.csv").head(num_top)
         probas_fns = list(results['probas_fn'])
 
@@ -125,7 +128,6 @@ def main():
     # Now combine H1N1 and Seasonal
     #################################
 
-    if False:
 
         h1n1_df = pd.read_csv(h1n1_out_fn)
         seasonal_df = pd.read_csv(seasonal_out_fn)
@@ -150,10 +152,10 @@ def main():
     # Pump
     ##########################
 
-    if False:
+    if do_pump:
 
         # One way is to just get the top N results from the results file
-        num_top = 15
+        num_top = 31
         results = pd.read_csv("pump/results.csv").head(num_top)
         probas_fns = list(results['probas_fn'])
 
@@ -173,10 +175,10 @@ def main():
     # Earthquake
     ##########################
 
-    if True:
+    if do_earthquake:
 
         # One way is to just get the top N results from the results file
-        num_top = 50
+        num_top = 4
         results = pd.read_csv("earthquake/results.csv").head(num_top)
         probas_fns = list(results['probas_fn'])
 
