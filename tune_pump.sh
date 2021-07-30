@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=TuneEQ
+#SBATCH --job-name=TunePump
 #SBATCH --cpus-per-task=10   
 #SBATCH --mem=50gb
 #SBATCH --time=30:00:00      
@@ -9,4 +9,4 @@ pwd
 which python
 source flaml_env_slurm/bin/activate
 which python
-python tune_eq.py -g 3 -a 1
+python tune_pump.py -g 3 -a 4

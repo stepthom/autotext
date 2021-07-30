@@ -31,64 +31,27 @@ def dump_json(fn, json_obj):
     with open(fn, 'w') as fp:
         json.dump(json_obj, fp, indent=4, cls=NumpyEncoder)
 
-"""
-class SteveEQPrepper(BaseEstimator, TransformerMixin):
-    def __init__(self, min_num=25):
-        #print("SteveEQPrepper: init")
-        self.min_num = min_num
-        self.level_3_counts = None
-
-    def fit(self, X, y=None):
-        #print("SteveEQPrepper: fit")
-        self.level_3_counts = X.groupby('geo_level_3_id').agg({'geo_level_3_id': 'count'})
-        return self
-
-    def transform(self, X, y=None):
-        #print("SteveEQPrepper: tranform")
-        _X = X.copy()
-
-        def f(row, level_3_counts, min_num):
-            geo_level_1_id = row['geo_level_1_id']
-            geo_level_2_id = row['geo_level_2_id']
-            geo_level_3_id = row['geo_level_3_id']
-            return int(geo_level_3_id)
-            if geo_level_3_id not in level_3_counts.index or level_3_counts.loc[geo_level_3_id][0] < min_num:
-                return geo_level_2_id
-            else:
-                return geo_level_3_id
-
-        _X['geo_level_3_id'] = _X.apply(f, args=(self.level_3_counts, self.min_num), axis=1)
-
-        return _X
-"""
-
 def main():    
     parser = argparse.ArgumentParser()
-    parser.add_argument('-g', '--geo-id-set', type=int, default=1)
+    #parser.add_argument('-g', '--keep-top-id', type=int, default=1)
     parser.add_argument('-a', '--algo-set', type=int, default=1)
     
     args = parser.parse_args()
     runname = str(uuid.uuid4())
     
-    id_col = 'building_id'
-    target_col = 'damage_grade'
-    out_dir = 'earthquake/out'
+    id_col = 'respondent_id'
+    target_col = 'seasonal_vaccine'
+    out_dir = 'seasonal/out'
     data_id = '000'
-    metric = "micro_f1"
-
-    train_df  = pd.read_csv('earthquake/earthquake_train.csv')
-    #train_df  = train_df.sample(frac=0.1, random_state=3)
-    test_df  = pd.read_csv('earthquake/earthquake_test.csv')
+    metric = "roc_auc"
     
-    if args.geo_id_set == 1:
-        train_df[['geo_level_1_id']] = train_df[['geo_level_1_id']].astype('category')
-    elif args.geo_id_set == 2:
-        train_df[['geo_level_1_id']] = train_df[['geo_level_1_id']].astype('category')
-        train_df[['geo_level_2_id']] = train_df[['geo_level_2_id']].astype('category')
-    else:
-        train_df[['geo_level_1_id']] = train_df[['geo_level_1_id']].astype('category')
-        train_df[['geo_level_2_id']] = train_df[['geo_level_2_id']].astype('category')
-        train_df[['geo_level_3_id']] = train_df[['geo_level_3_id']].astype('category')
+    train_fn = "seasonal/data/vaccine_seasonal_train_76461de2-3fe8-4cb2-a48e-48a6fb23c5e8.csv"
+    test_fn = "seasonal/data/vaccine_seasonal_test_76461de2-3fe8-4cb2-a48e-48a6fb23c5e8.csv"
+
+    train_df  = pd.read_csv(train_fn)
+    #train_df  = train_df.sample(frac=0.1, random_state=3)
+    test_df  = pd.read_csv(test_fn)
+    
         
     estimator_list = ['lgbm']
     ensemble = False
@@ -106,8 +69,8 @@ def main():
     y = train_df[target_col]
 
     results = {}
-    run_fn = os.path.join(out_dir, "tune_eq_{}.json".format(runname))
-    print("tune_eq: Run name: {}".format(runname))
+    run_fn = os.path.join(out_dir, "tune_{}.json".format(runname))
+    print("tune: Run name: {}".format(runname))
 
     results['runname'] = runname
     results['args'] = vars(args)
@@ -147,7 +110,7 @@ def main():
     preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
     preds_fn = os.path.join(out_dir, "{}-{}-preds.csv".format(runname, data_id))
     preds_df.to_csv(preds_fn, index=False)
-    print("tune_eq: Wrote preds file: {}".format(preds_fn))
+    print("tune: Wrote preds file: {}".format(preds_fn))
 
     probas = clf.predict_proba(X_test)
     columns = None
@@ -158,7 +121,7 @@ def main():
     probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
     probas_fn = os.path.join(out_dir, "{}-{}-probas.csv".format(runname, data_id))
     probas_df.to_csv(probas_fn, index=False)
-    print("tune_eq: Wrote probas file: {}".format(probas_fn))
+    print("tune: Wrote probas file: {}".format(probas_fn))
 
     results['preds_fn'] = preds_fn
     results['probas_fn'] = probas_fn
