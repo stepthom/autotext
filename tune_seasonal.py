@@ -31,28 +31,28 @@ def dump_json(fn, json_obj):
     with open(fn, 'w') as fp:
         json.dump(json_obj, fp, indent=4, cls=NumpyEncoder)
 
-def main():    
+def main():
     parser = argparse.ArgumentParser()
     #parser.add_argument('-g', '--keep-top-id', type=int, default=1)
     parser.add_argument('-a', '--algo-set', type=int, default=1)
-    
+
     args = parser.parse_args()
     runname = str(uuid.uuid4())
-    
+
     id_col = 'respondent_id'
     target_col = 'seasonal_vaccine'
     out_dir = 'seasonal/out'
     data_id = '000'
     metric = "roc_auc"
-    
+
     train_fn = "seasonal/data/vaccine_seasonal_train_76461de2-3fe8-4cb2-a48e-48a6fb23c5e8.csv"
     test_fn = "seasonal/data/vaccine_seasonal_test_76461de2-3fe8-4cb2-a48e-48a6fb23c5e8.csv"
 
     train_df  = pd.read_csv(train_fn)
     #train_df  = train_df.sample(frac=0.1, random_state=3)
     test_df  = pd.read_csv(test_fn)
-    
-        
+
+
     estimator_list = ['lgbm']
     ensemble = False
     if args.algo_set == 1:
@@ -60,7 +60,7 @@ def main():
     elif args.algo_set == 2:
         estimator_list = ['xgboost']
     elif args.algo_set == 3:
-        estimator_list = ['lgbm', 'xgboost']
+        estimator_list = ['lgbm', 'xgboost', 'catboost']
         ensemble = True
     elif args.algo_set == 4:
         estimator_list = ['catboost']
@@ -74,11 +74,15 @@ def main():
 
     results['runname'] = runname
     results['args'] = vars(args)
+    os_steve_min_sample_leaf =  int(os.environ.get('OS_STEVE_MIN_SAMPLE_LEAF', "10"))
+    os_steve_smoothing       =  float(os.environ.get('OS_STEVE_SMOOTHING', "0.1"))
+    results['os_steve_min_sample_leaf'] = os_steve_min_sample_leaf
+    results['os_steve_smoothing'] = os_steve_smoothing
     results['hostname'] = socket.gethostname()
     results['starttime'] = str(datetime.datetime.now())
 
     automl_settings = {
-        "time_budget": 20000,
+        "time_budget": 50000,
         "log_file_name": "logs/flaml-{}.log".format(runname),
         "task": 'classification',
         "n_jobs": 8,
@@ -99,12 +103,12 @@ def main():
     results['automl_settings'] =  automl_settings
     results['best_score'] =  1 - clf.best_loss
     results['best_config'] =  clf.best_config
-    
+
 
 
     print("Run name: {}".format(runname))
     print("Run file name: {}".format(run_fn))
-   
+
     X_test = test_df.drop([id_col], axis=1)
     preds = clf.predict(X_test)
     preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})

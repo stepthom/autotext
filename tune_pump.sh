@@ -9,4 +9,4 @@ pwd
 which python
 source flaml_env_slurm/bin/activate
 which python
-python tune_pump.py -g 3 -a 4
+OS_STEVE_MIN_SAMPLE_LEAF=25 OS_STEVE_SMOOTHING=50.0 python tune_pump.py -g 3 -a 2

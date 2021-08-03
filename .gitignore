@@ -12,6 +12,14 @@ flaml_env_slurm/
 flaml_env/
 mljar_env/
 
+bio_corex
+seasonal
+pump
+h1n1
+earthquake
+slurm
+tmp_scripts
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

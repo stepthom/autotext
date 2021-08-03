@@ -60,7 +60,7 @@ def main():
     elif args.algo_set == 2:
         estimator_list = ['xgboost']
     elif args.algo_set == 3:
-        estimator_list = ['lgbm', 'xgboost']
+        estimator_list = ['lgbm', 'xgboost', 'catboost']
         ensemble = True
     elif args.algo_set == 4:
         estimator_list = ['catboost']
@@ -74,11 +74,15 @@ def main():
 
     results['runname'] = runname
     results['args'] = vars(args)
+    os_steve_min_sample_leaf =  int(os.environ.get('OS_STEVE_MIN_SAMPLE_LEAF', "10"))
+    os_steve_smoothing       =  float(os.environ.get('OS_STEVE_SMOOTHING', "0.1"))
+    results['os_steve_min_sample_leaf'] = os_steve_min_sample_leaf
+    results['os_steve_smoothing'] = os_steve_smoothing
     results['hostname'] = socket.gethostname()
     results['starttime'] = str(datetime.datetime.now())
 
     automl_settings = {
-        "time_budget": 20000,
+        "time_budget": 50000,
         "log_file_name": "logs/flaml-{}.log".format(runname),
         "task": 'classification',
         "n_jobs": 8,
