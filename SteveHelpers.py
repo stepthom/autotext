@@ -95,10 +95,6 @@ class SteveCategoryCoalescer(BaseEstimator, TransformerMixin):
             top_values = top_values + vals
         return top_values
     
-    def keep_only(self, X, column, keep_list, replace_val='__OTHER__'):
-        X.loc[~X[column].isin(keep_list), column] = replace_val
-        return X
-
     def fit(self, X, y=None):
         
         if self.cat_cols is None:
@@ -116,7 +112,9 @@ class SteveCategoryCoalescer(BaseEstimator, TransformerMixin):
     
     def transform(self, X, y=None):
         _X = X.copy()
+        _X[self.cat_cols] = _X[self.cat_cols].astype('category')
         for c in self.cat_cols:
+            _X[c] = _X[c].cat.add_categories('__OTHER__')
             _X.loc[~_X[c].isin(self.top_n_values[c]), c] = "__OTHER__"
         return _X
 
@@ -170,10 +168,30 @@ class SteveCategoryImputer(BaseEstimator, TransformerMixin):
         _X[self.cat_cols] = _X[self.cat_cols].astype('category')
         
         return _X
+
     
+class SteveNumericImputer(BaseEstimator, TransformerMixin):
+    def __init__(self, num_cols=None, imputer=None):
+        self.num_cols = num_cols
+        self.imputer = imputer
+        
+    def fit(self, X, y=None):
+        self.imputer.fit(X[self.num_cols], y)
+        return self
+
+    def transform(self, X, y=None):
+        _X = X.copy()
+        
+        _X[self.num_cols] = self.imputer.transform(_X[self.num_cols])
+        
+        # Preserve data types of original dataframe
+        for col in self.num_cols:
+            _X[col] =  _X[col].astype(X.dtypes[col])
+        
+        return _X
  
 class SteveNumericNormalizer(BaseEstimator, TransformerMixin):
-    def __init__(self, float_cols=None, drop_orig=True):
+    def __init__(self, float_cols=None, drop_orig=False):
         self.float_cols = float_cols
         self.drop_orig = drop_orig
         self.scaler = StandardScaler()
@@ -211,15 +229,15 @@ class SteveDateExtractor(BaseEstimator, TransformerMixin):
         for col in self.date_cols:
             _X[col] =  pd.to_datetime(_X[col], errors='coerce')
             tmp_dt = _X[col].dt
-            new_columns_dict = {f'year_{col}': tmp_dt.year, 
-                                f'month_{col}': tmp_dt.month,
-                                f'day_{col}': tmp_dt.day, 
-                                #f'hour_{col}': tmp_dt.hour,
-                                #f'minute_{col}': tmp_dt.minute, 
-                                #f'second_{col}': tmp_dt.second,
-                                f'dayofweek_{col}': tmp_dt.dayofweek,
-                                f'dayofyear_{col}': tmp_dt.dayofyear,
-                                f'quarter_{col}': tmp_dt.quarter}
+            new_columns_dict = {f'{col}_date_year': tmp_dt.year, 
+                                f'{col}_date_month': tmp_dt.month,
+                                f'{col}_date_day': tmp_dt.day, 
+                                #f'{col}_date_hour': tmp_dt.hour,
+                                #f'{col}_date_minute': tmp_dt.minute, 
+                                #f'{col}_date_second': tmp_dt.second,
+                                f'{col}_date_dayofweek': tmp_dt.dayofweek,
+                                f'{col}_date_dayofyear': tmp_dt.dayofyear,
+                                f'{col}_date_quarter': tmp_dt.quarter}
             for new_col_name in new_columns_dict.keys():
                 if new_col_name not in _X.columns and \
                         new_columns_dict.get(new_col_name).nunique(dropna=False) >= 2:
@@ -259,10 +277,13 @@ class SteveMissingIndicator(BaseEstimator, TransformerMixin):
     
         _new_cols = self.num_indicator.transform(_X[self.num_cols])
         if not isinstance(_new_cols, pd.DataFrame):
-            _new_cols = pd.DataFrame(_new_cols, columns=["missing_{}".format(c) for c in self.num_cols])
+            _new_cols = pd.DataFrame(_new_cols, columns=["{}_missing".format(c) for c in self.num_cols])
         _X = pd.concat([_X, _new_cols], axis=1, ignore_index=False)
         
         return _X
+    
+#class SteveGenericTransformerWrapper(BaseEstimator, TransformerMixin):
+    #def __init__(self, cols=[], col_types=[], cols_pattern=None, drop_orig=False, transformer=None, prefix="trans_", **init_params):
     
 class SteveAutoFeatLight(BaseEstimator, TransformerMixin):
     def __init__(self, num_cols=[], compute_ratio=False, compute_product=True, scale=False):
@@ -280,14 +301,128 @@ class SteveAutoFeatLight(BaseEstimator, TransformerMixin):
         _X = X.copy()
     
         _new_cols = self.autofeat.transform(_X[self.num_cols])
-        if not isinstance(_new_cols, pd.DataFrame):
-            _new_cols = pd.DataFrame(_new_cols, columns=["autofeat_{}".format(c) for c in self.num_cols])
-           
         # Autofit will create duplicate columns - remove
         _new_cols = _new_cols.drop(self.num_cols, axis=1)
+        
+        # Rename the columns
+        _new_cols.columns = ["{}_autofeat".format(i) for i in range(_new_cols.shape[1])]
+           
         _X = pd.concat([_X, _new_cols], axis=1, ignore_index=False)
         
         return _X
+    
+class SteveKernelPCA(BaseEstimator, TransformerMixin):
+    def __init__(self, num_cols=[], drop_orig=False, sample_frac=None, n_components=20, kernel='rbf', eigen_solver="arpack", max_iter=500):
+        self.num_cols = num_cols
+        self.drop_orig = drop_orig
+        self.sample_frac = sample_frac
+        self.pca = KernelPCA(n_components=n_components, kernel=kernel, n_jobs=8, eigen_solver=eigen_solver, max_iter=max_iter)
+        
+    def fit(self, X, y=None):
+        _X = X.copy()
+        if self.sample_frac is not None:
+            _X = _X.sample(frac=self.sample_frac, replace=False, random_state=42, axis=0)
+        self.pca.fit(_X[self.num_cols])
+        return self
+    
+    def transform(self, X, y=None):
+        _X = X.copy()
+        
+        _new_cols = self.pca.transform(_X[self.num_cols])
+        if not isinstance(_new_cols, pd.DataFrame):
+            _new_col_names =  ["{}_{}".format(i, 'pca') for i in range(_new_cols.shape[1])]
+            _new_cols = pd.DataFrame(_new_cols, columns=_new_col_names)
+        _X = pd.concat([_X, _new_cols], axis=1, ignore_index=False)
+        
+        if self.drop_orig:
+            _X = _X.drop(self.num_cols, axis=1)
+    
+        return _X
+    
+    
+class SteveDateDiffer(BaseEstimator, TransformerMixin):
+    # date_col2 is the name of a column (that has a date),
+    def __init__(self, date_col1=None, date_col2=None, new_col="timediff"):
+        self.date_col1 = date_col1
+        self.date_col2 = date_col2
+        self.new_col = new_col
+    def fit(self, X, y=None):
+        return self
+    def transform(self, X, y=None):
+        _X = X.copy()
+        _X[self.new_col] = (_X[self.date_col1] - _X[self.date_col2]).dt.days
+        return _X
+    
+class SteveConstantDateDiffer(BaseEstimator, TransformerMixin):
+    # date_col2 is a constant datetime object
+    def __init__(self, date_col1=None, date2=None, new_col="timediff"):
+        self.date_col1 = date_col1
+        self.date2 = date2
+        self.new_col = new_col
+    def fit(self, X, y=None):
+        return self
+    def transform(self, X, y=None):
+        _X = X.copy()
+        _X[self.new_col] = (_X[self.date_col1] - self.date2).dt.days
+        return _X
+    
+class SteveFeatureDropper(BaseEstimator, TransformerMixin):
+    def __init__(self, cols=[]):
+        self.cols = cols
+    def fit(self, X, y=None):
+        return self
+    def transform(self, X, y=None):
+        _X = X.copy()
+        _X = _X.drop(self.cols, axis=1)
+        return _X
+    
+class SteveFeatureTyper(BaseEstimator, TransformerMixin):
+    # Change all cols to type type
+    def __init__(self, cols=[], typestr=None):
+        self.cols = cols
+        self.typestr = typestr
+    def fit(self, X, y=None):
+        return self
+    def transform(self, X, y=None):
+        _X = X.copy()
+        _X[self.cols] = _X[self.cols].astype(self.typestr)
+        return _X
+    
+class SteveValueReplacer(BaseEstimator, TransformerMixin):
+    # Change all cols to type type
+    def __init__(self, cols=[], to_replace=None, value=None):
+        self.cols = cols
+        self.to_replace = to_replace
+        self.value = value
+    def fit(self, X, y=None):
+        return self
+    def transform(self, X, y=None):
+        _X = X.copy()
+        _X[self.cols] = _X[self.cols].replace(self.to_replace, self.value)
+        return _X
+    
+class SteveMeansByColValue(BaseEstimator, TransformerMixin):
+    # For the given column of interest (categorical),
+    # will compute the means of other columsn for each level
+    # and add a new feature
+    def __init__(self, col_of_interest=None, num_cols=[]):
+        self.col_of_interest = col_of_interest
+        self.num_cols = num_cols
+        self.val_by_col_of_interest = {}
+    def fit(self, X, y=None):
+        for c in self.num_cols:
+            mean_val = X[c].mean(skipna=True)
+            self.val_by_col_of_interest[c] =  X.groupby(self.col_of_interest).agg({c: lambda x: x.mean(skipna=True)}).fillna(mean_val)
+            
+        return self
+    def transform(self, X, y=None):
+        _X = X.copy()
+        for c in self.num_cols:
+            _val_by_region = self.val_by_col_of_interest[c]
+            _X["{}_{}_mean".format(c, self.col_of_interest)] = _X[self.col_of_interest].map(_val_by_region[c])
+
+        return _X
+        
         
    
 def get_data_types(df, id_col, target_col):
@@ -304,7 +439,7 @@ def get_data_types(df, id_col, target_col):
     bin_cols = []
     date_cols = []
     
-    for c in df.columns:
+    for c in df.columns.values:
         if c == id_col or c == target_col:
             continue
         col_type = df[c].dtype
