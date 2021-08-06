@@ -71,8 +71,6 @@ prep = SteveNumericCapper(num_cols=['f2', 'f4'], max_val=6 )
 prep.fit(df)
 print(prep.transform(df))
 
-exit()
-
 
 print("Test CategoryImputer")
 prep = SteveCategoryImputer(cat_cols=['f1', 'f3'], )

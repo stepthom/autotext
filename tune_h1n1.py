@@ -5,38 +5,43 @@ import argparse
 import numpy as np
 import pandas as pd
 import os
+import sys
 
 import json
 import socket
 import datetime
 
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
 
 from flaml import AutoML
 
-class NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        return json.JSONEncoder.default(self, obj)
-
-def dump_json(fn, json_obj):
-    # Write json_obj to a file named fn
-
-    def dumper(obj):
-        try:
-            return obj.toJSON()
-        except:
-            return obj.__dict__
-
-    with open(fn, 'w') as fp:
-        json.dump(json_obj, fp, indent=4, cls=NumpyEncoder)
+from SteveHelpers import dump_json, get_data_types
+from SteveHelpers import SteveCorexWrapper
+from SteveHelpers import SteveNumericNormalizer
+from SteveHelpers import SteveAutoFeatLight
+from SteveHelpers import SteveFeatureDropper
+from SteveHelpers import SteveFeatureTyper
+from SteveHelpers import SteveEncoder
+from SteveHelpers import SteveNumericCapper
+from SteveHelpers import *
 
 def main():    
     parser = argparse.ArgumentParser()
-    #parser.add_argument('-g', '--keep-top-id', type=int, default=1)
     parser.add_argument('-a', '--algo-set', type=int, default=1)
+    parser.add_argument('--n-hidden', type=int, default=4)
+    parser.add_argument('--dim-hidden', type=int, default=2)
+    parser.add_argument('--smooth-marginals', default=False, type=lambda x: (str(x).lower() in ['true','1', 'yes']))
+    parser.add_argument('--min-sample-leaf', type=int, default=5)
+    parser.add_argument('--smoothing', type=float, default=10.0)
+    parser.add_argument('--autofeat', default=False, type=lambda x: (str(x).lower() in ['true','1', 'yes']))
+    parser.add_argument('--normalize', default=False, type=lambda x: (str(x).lower() in ['true','1', 'yes']))
+    parser.add_argument('--ensemble', default=False, type=lambda x: (str(x).lower() in ['true','1', 'yes']))
     
     args = parser.parse_args()
+    
+    print(args)
+    
     runname = str(uuid.uuid4())
     
     id_col = 'respondent_id'
@@ -45,8 +50,10 @@ def main():
     data_id = '000'
     metric = "roc_auc"
     
-    train_fn = "h1n1/data/vaccine_h1n1_train_481e85dd-2af9-4abc-b5f6-fb0f66a94ed3.csv"
-    test_fn = "h1n1/data/vaccine_h1n1_test_481e85dd-2af9-4abc-b5f6-fb0f66a94ed3.csv"
+    train_fn = "h1n1/vaccine_h1n1_train.csv"
+    test_fn = "h1n1/vaccine_h1n1_test.csv"
+    #train_fn = "h1n1/data/vaccine_h1n1_train_481e85dd-2af9-4abc-b5f6-fb0f66a94ed3.csv"
+    #test_fn = "h1n1/data/vaccine_h1n1_test_481e85dd-2af9-4abc-b5f6-fb0f66a94ed3.csv"
 
     train_df  = pd.read_csv(train_fn)
     #train_df  = train_df.sample(frac=0.1, random_state=3)
@@ -67,7 +74,68 @@ def main():
 
     X = train_df.drop([id_col, target_col], axis=1)
     y = train_df[target_col]
+    X_test = test_df.drop([id_col], axis=1)
+    
+    
+    #prep1 = Pipeline([
+        #('typer', SteveFeatureTyper(_bin_cols, typestr='int64'))
+    #])
+    
+    #prep1.fit(X)
+    #X = prep1.transform(X)
+    #X_test = prep1.transform(X_test)
+    
+    cat_cols, num_cols, bin_cols, float_cols, date_cols = get_data_types(X, id_col, target_col)
+    
+    print(X[[col for col in bin_cols if "missing_" not in col]].head().T)
+    
+    steps = []
+    
+    steps.append(('missing_indicator', SteveMissingIndicator(num_cols)))
+    steps.append(('num_imputer', SteveNumericImputer(num_cols,  SimpleImputer(missing_values=np.nan, strategy="median"))))
+    #steps.append(('num_autfeat', SteveAutoFeatLight(float_cols)))
+    steps.append(('cat_impute', SteveCategoryImputer(cat_cols)))
+    steps.append(('cat_smush', SteveCategoryCoalescer(keep_top=5, cat_cols=cat_cols)))
+    
+    #if args.n_hidden >= 1:
+        #steps.append(('typer', SteveFeatureTyper(bin_cols, typestr='int64')))
+        #steps.append(('corex', SteveCorexWrapper([col for col in bin_cols if "_missing" not in col], n_hidden=args.n_hidden)))
+        #steps.append(('dropper', SteveFeatureDropper(bin_cols)))
+        #steps.append(('dropper', SteveFeatureDropper(like='_corex', inverse=True)))
+        #pass
+    #else:
+        #steps.append(('dropper', SteveFeatureDropper(bin_cols, inverse=True)))
+        
+    #steps.append(('cat_encoder', SteveEncoder(
+        #cols=list(set(cat_cols) - set(geo_id_set)), 
+        #encoder=OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32))))
 
+    
+    if args.autofeat:
+        steps.append(('num_autofeat', SteveAutoFeatLight(float_cols)))
+        
+    if args.normalize:
+        steps.append(('num_normalizer', SteveNumericNormalizer(float_cols, drop_orig=True)))
+        
+    print(steps)
+    
+    preprocessor = Pipeline(steps)
+    
+    preprocessor.fit(X)
+    X = preprocessor.transform(X)
+    X_test = preprocessor.transform(X_test)
+    
+    print("X head:", file=sys.stderr)
+    print(X.head().T, file=sys.stderr)
+    print("X dtypes:", file=sys.stderr)
+    print(X.dtypes, file=sys.stderr)
+    print("X_test head:", file=sys.stderr)
+    print(X_test.head().T, file=sys.stderr)
+    
+    #X[bin_cols] = X[bin_cols].astype('int64')
+    #print(X[bin_cols].head().T)
+    
+    
     results = {}
     run_fn = os.path.join(out_dir, "tune_{}.json".format(runname))
     print("tune: Run name: {}".format(runname))
@@ -82,7 +150,7 @@ def main():
     results['starttime'] = str(datetime.datetime.now())
 
     automl_settings = {
-        "time_budget": 50000,
+        "time_budget": 1000,
         "log_file_name": "logs/flaml-{}.log".format(runname),
         "task": 'classification',
         "n_jobs": 8,
