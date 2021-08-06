@@ -1,5 +1,6 @@
 import argparse
 import subprocess
+from itertools import product
 
 # Hyperparam tuning using slurm.
 # For each hyper param combo, generate a temporary bash script with the appropriate call to tune.
@@ -7,38 +8,65 @@ import subprocess
 
 def main():    
    
-    for geo_id_set in [2, 3]:
-        for algo_set in [1, 3]:
-            for min_sample_leaf in [1, 3, 5]:
-                for smoothing in [0.1, 0.5, 1.0]:
-                    for n_hidden in [2, 4, 8, 16]:
-                        for smooth_marginals in ["true", "false"]:
+    geo_id_sets = [3, 2]
+    algo_sets = [3]
+    min_sample_leafs = [1, 3, 5]
+    smoothings = [0.1, 1.0, 10]
+    n_hiddens = [6]
+    smooth_marginals = ["false"]
+    
+    autofeats = ["true", "false"]
+    
+    #normalizes = ["true", "false"]
+    normalizes = ["true"]
+    
+    ensembles = ["true", "false"]
+    #ensembles = ["true"]
+    
+    all_combos = list(product(geo_id_sets, algo_sets, 
+                              min_sample_leafs, smoothings,
+                              n_hiddens, smooth_marginals,
+                              autofeats, normalizes,
+                              ensembles))
+   
+    print("Number of combos: {}".format(len(all_combos)))
+    for combo in all_combos:
+   
+        geo_id_set = combo[0]
+        algo_set = combo[1]
+        min_sample_leaf = combo[2]
+        smoothing = combo[3]
+        n_hidden = combo[4]
+        smooth_marginals = combo[5]
+        autofeat = combo[6]
+        normalize = combo[7]
+        ensemble = combo[8]
 
-                            string = '\n'.join([
-                                "#!/bin/bash",
-                                "#SBATCH --job-name=TuneEQ",
-                                "#SBATCH --cpus-per-task=10"  ,
-                                "#SBATCH --mem=20gb",
-                                "#SBATCH --time=20:00:00",
-                                "#SBATCH --output=slurm/R-%x-%j.out",
+        string = '\n'.join([
+            "#!/bin/bash",
+            "#SBATCH --job-name=TuneEQ",
+            "#SBATCH --cpus-per-task=10"  ,
+            "#SBATCH --mem=20gb",
+            "#SBATCH --time=40:00:00",
+            "#SBATCH --output=slurm/R-%x-%j.out",
 
-                                "",
-                                "pwd",
-                                "which python",
-                                "source flaml_env_slurm/bin/activate",
-                                "which python",
-                                "python tune_eq.py --geo-id-set {} --algo-set {} --min-sample-leaf {} --smoothing {} --n_hidden {} --smooth-marginals {}".format(
-                                    geo_id_set, algo_set, min_sample_leaf, smoothing, n_hidden, smooth_marginals),
-                            ]
-                            )
+            "",
+            "pwd",
+            "which python",
+            "source flaml_env_slurm/bin/activate",
+            "which python",
+            "python tune_eq.py --geo-id-set {} --algo-set {} --min-sample-leaf {} --smoothing {} --n-hidden {} --smooth-marginals {} --autofeat {} --normalize {} --ensemble {}".format(
+                geo_id_set, algo_set, min_sample_leaf, smoothing, n_hidden, smooth_marginals, autofeat, normalize, ensemble),
+        ]
+        )
 
-                            f_name = 'tmp_scripts/tune_eq_tmp.sh'
-                            with open(f_name, "w") as text_file:
-                                text_file.write(string)
-                                
-                            cmd = [ "sbatch", f_name ] 
-                            p = subprocess.Popen(cmd, universal_newlines=True, bufsize=1)
-                            exit_code = p.wait()
+        f_name = 'tmp_scripts/tune_eq_tmp.sh'
+        with open(f_name, "w") as text_file:
+            text_file.write(string)
+
+        cmd = [ "sbatch", f_name ] 
+        p = subprocess.Popen(cmd, universal_newlines=True, bufsize=1)
+        exit_code = p.wait()
 
     
 if __name__ == "__main__":

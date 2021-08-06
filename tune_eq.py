@@ -12,6 +12,7 @@ import socket
 import datetime
 
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
 
 from flaml import AutoML
 
@@ -21,15 +22,17 @@ from SteveHelpers import SteveNumericNormalizer
 from SteveHelpers import SteveAutoFeatLight
 from SteveHelpers import SteveFeatureDropper
 from SteveHelpers import SteveFeatureTyper
+from SteveHelpers import SteveEncoder
+from SteveHelpers import SteveNumericCapper
 
 def main():    
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('-g', '--geo-id-set', type=int, default=3)
     parser.add_argument('-a', '--algo-set', type=int, default=1)
     parser.add_argument('--n-hidden', type=int, default=4)
     parser.add_argument('--dim-hidden', type=int, default=2)
     parser.add_argument('--smooth-marginals', default=False, type=lambda x: (str(x).lower() in ['true','1', 'yes']))
-    parser.add_argument('--min-sample-leaf', type=int, default=1)
+    parser.add_argument('--min-sample-leaf', type=int, default=5)
     parser.add_argument('--smoothing', type=float, default=10.0)
     parser.add_argument('--autofeat', default=False, type=lambda x: (str(x).lower() in ['true','1', 'yes']))
     parser.add_argument('--normalize', default=False, type=lambda x: (str(x).lower() in ['true','1', 'yes']))
@@ -83,14 +86,24 @@ def main():
     cat_cols, num_cols, bin_cols, float_cols, date_cols = get_data_types(X, id_col, target_col)
     
     steps = []
-    steps.append(('corex', SteveCorexWrapper(bin_cols, n_hidden=args.n_hidden)))
-    steps.append(('dropper', SteveFeatureDropper(bin_cols)))
+    
+    if False and args.n_hidden >= 1:
+        steps.append(('corex', SteveCorexWrapper(bin_cols, n_hidden=args.n_hidden)))
+        steps.append(('dropper', SteveFeatureDropper(bin_cols)))
+        
+    #steps.append(('cat_encoder', SteveEncoder(
+        #cols=list(set(cat_cols) - set(geo_id_set)), 
+        #encoder=OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32))))
+
+    steps.append(('num_capper', SteveNumericCapper(num_cols=['age'], max_val=30)))
     
     if args.autofeat:
-        steps.append(('num_autfeat', SteveAutoFeatLight(float_cols)))
+        steps.append(('num_autofeat', SteveAutoFeatLight(float_cols)))
         
     if args.normalize:
         steps.append(('num_normalizer', SteveNumericNormalizer(float_cols, drop_orig=True)))
+        
+    print(steps)
     
     preprocessor = Pipeline(steps)
     
@@ -119,10 +132,10 @@ def main():
     results['starttime'] = str(datetime.datetime.now())
 
     automl_settings = {
-        "time_budget": 50000,
+        "time_budget": 100000,
         "log_file_name": "logs/flaml-{}.log".format(runname),
         "task": 'classification',
-        "n_jobs": 8,
+        "n_jobs": 5,
         "estimator_list": estimator_list,
         "model_history": False,
         "eval_method": "cv",

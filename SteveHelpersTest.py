@@ -22,6 +22,7 @@ from SteveHelpers import SteveFeatureDropper
 from SteveHelpers import *
 
 df = pd.DataFrame(data={
+    'f0': ['aa', 'aa', 'aa', 'aa', 'aa', 'aa', 'aa', 'zz', 'zz', 'zz', 'zz'],
     'f1': ['a', 'a', 'a', 'a', 'b', 'b', 'b', 'c', 'c', 'd', 'e'],
     'f2': [1.,   2.,  3.,  4.,  5.,  6.,  7.,  8.,  9., 10., 11.],
     'f3': ['a', 'a', 'a', np.nan, 'b', 'b', 'b', 'c', 'c', np.nan, 'e'],
@@ -40,6 +41,8 @@ df = pd.DataFrame(data={
           '2029-12-22 12:13:14', '2012-01-02 00:00:00', '2018-02-01 00:00:00'],
 })
 
+y = pd.DataFrame({'target': [1, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1]})
+
 pd.set_option('display.max_columns', 500)
 pd.set_option('display.width', 150)
 
@@ -49,6 +52,7 @@ prep.fit(df)
 df = prep.transform(df)
 
 print(df)
+print(y)
 
 #df['f7'] = pd.to_datetime(df['f7'])
 #df['f12'] = pd.to_datetime(df['f12'])
@@ -56,6 +60,18 @@ cat_cols, num_cols, bin_cols, float_cols, date_cols = get_data_types(df, '', '')
 
 
 from sklearn.pipeline import Pipeline
+
+#print("Test GeoTargetEncoder")
+#prep = SteveGeoTargetEncoder(cols=['f1'], upper_col='f0')
+#prep.fit(df, y)
+#print(prep.transform(df))
+
+print("Test NumericCapper")
+prep = SteveNumericCapper(num_cols=['f2', 'f4'], max_val=6 )
+prep.fit(df)
+print(prep.transform(df))
+
+exit()
 
 
 print("Test CategoryImputer")
@@ -108,6 +124,21 @@ prep = SteveFeatureDropper(cols=['f1', 'f2', 'f12'])
 prep.fit(df)
 print(prep.transform(df))
 
+print("Test FeatureDropper")
+prep = SteveFeatureDropper(cols=['f1', 'f2', 'f12'], inverse=True)
+prep.fit(df)
+print(prep.transform(df))
+
+print("Test FeatureDropper")
+prep = SteveFeatureDropper(cols=['f2'], like="f1", inverse=True)
+prep.fit(df)
+print(prep.transform(df))
+exit()
+
+print("Test MeansByColValue ")
+prep = SteveMeansByColValue(col_of_interest='f1', num_cols=['f2', 'f4'])
+prep.fit(df)
+print(prep.transform(df))
 print("Test MeansByColValue ")
 prep = SteveMeansByColValue(col_of_interest='f1', num_cols=['f2', 'f4'])
 prep.fit(df)

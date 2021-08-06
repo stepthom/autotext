@@ -55,16 +55,23 @@ class SteveCorexWrapper(BaseEstimator, TransformerMixin):
         self.n_hidden = n_hidden
         self.dim_hidden = dim_hidden
         self.smooth_marginals = smooth_marginals
-        self.corex = corex.Corex(n_hidden=n_hidden, dim_hidden=dim_hidden, marginal_description='discrete', smooth_marginals=smooth_marginals)
         self.drop_orig = drop_orig
+        self.corex = corex.Corex(n_hidden=n_hidden, dim_hidden=dim_hidden, marginal_description='discrete', smooth_marginals=smooth_marginals)
+        
+        #self.corex1 = corex.Corex(n_hidden=8, dim_hidden=dim_hidden, marginal_description='discrete', smooth_marginals=smooth_marginals)
+        #self.corex2 = corex.Corex(n_hidden=4, dim_hidden=dim_hidden, marginal_description='discrete', smooth_marginals=smooth_marginals)
 
     def fit(self, X, y=None):
         if self.bin_cols:
             self.corex.fit(X[self.bin_cols])
+            #Y1 = self.corex1.fit_transform(X[self.bin_cols])
+            #self.corex2.fit(Y1)
         return self
 
     def transform(self, X, y=None):
         _X = X.copy()
+        #Y1 = self.corex1.transform(_X[self.bin_cols])
+        #_new_cols = self.corex2.transform(Y1)
         _new_cols = self.corex.transform(_X[self.bin_cols])
         _new_cols = pd.DataFrame(_new_cols, columns=["{}_corex".format(c) for c in range(self.n_hidden)])
         _X = pd.concat([_X, _new_cols], axis=1, ignore_index=False)
@@ -119,34 +126,238 @@ class SteveCategoryCoalescer(BaseEstimator, TransformerMixin):
         return _X
 
     
-class SteveEQPrepper(BaseEstimator, TransformerMixin):
-    def __init__(self, min_num=25):
+def get_obj_cols(df):
+    """
+    Returns names of 'object' columns in the DataFrame.
+    """
+    obj_cols = []
+    for idx, dt in enumerate(df.dtypes):
+        if dt == 'object' or pd.api.types.is_categorical_dtype(dt):
+            obj_cols.append(df.columns.values[idx])
+
+    return obj_cols
+
+def convert_cols_to_list(cols):
+    if isinstance(cols, pd.Series):
+        return cols.tolist()
+    elif isinstance(cols, np.ndarray):
+        return cols.tolist()
+    elif np.isscalar(cols):
+        return [cols]
+    elif isinstance(cols, set):
+        return list(cols)
+    elif isinstance(cols, tuple):
+        return list(cols)
+    elif pd.api.types.is_categorical(cols):
+        return cols.astype(object).tolist()
+
+    return cols
+
+def convert_input(X, columns=None, deep=False):
+    """
+    Unite data into a DataFrame.
+    Objects that do not contain column names take the names from the argument.
+    Optionally perform deep copy of the data.
+    """
+    if not isinstance(X, pd.DataFrame):
+        if isinstance(X, pd.Series):
+            X = pd.DataFrame(X, copy=deep)
+        else:
+            if columns is not None and np.size(X,1) != len(columns):
+                raise ValueError('The count of the column names does not correspond to the count of the columns')
+            if isinstance(X, list):
+                X = pd.DataFrame(X, columns=columns, copy=deep)  # lists are always copied, but for consistency, we still pass the argument
+            elif isinstance(X, (np.generic, np.ndarray)):
+                X = pd.DataFrame(X, columns=columns, copy=deep)
+            elif isinstance(X, csr_matrix):
+                X = pd.DataFrame(X.todense(), columns=columns, copy=deep)
+            else:
+                raise ValueError('Unexpected input type: %s' % (str(type(X))))
+    elif deep:
+        X = X.copy(deep=True)
+
+    return X
+
+
+def convert_input_vector(y, index):
+    """
+    Unite target data type into a Series.
+    If the target is a Series or a DataFrame, we preserve its index.
+    But if the target does not contain index attribute, we use the index from the argument.
+    """
+    if y is None:
+        raise ValueError('Supervised encoders need a target for the fitting. The target cannot be None')
+    if isinstance(y, pd.Series):
+        return y
+    elif isinstance(y, np.ndarray):
+        if len(np.shape(y))==1:  # vector
+            return pd.Series(y, name='target', index=index)
+        elif len(np.shape(y))==2 and np.shape(y)[0]==1:  # single row in a matrix
+            return pd.Series(y[0, :], name='target', index=index)
+        elif len(np.shape(y))==2 and np.shape(y)[1]==1:  # single column in a matrix
+            return pd.Series(y[:, 0], name='target', index=index)
+        else:
+            raise ValueError('Unexpected input shape: %s' % (str(np.shape(y))))
+    elif np.isscalar(y):
+        return pd.Series([y], name='target', index=index)
+    elif isinstance(y, list):
+        if len(y)==0 or (len(y)>0 and not isinstance(y[0], list)): # empty list or a vector
+            return pd.Series(y, name='target', index=index, dtype=float)
+        elif len(y)>0 and isinstance(y[0], list) and len(y[0])==1: # single row in a matrix
+            flatten = lambda y: [item for sublist in y for item in sublist]
+            return pd.Series(flatten(y), name='target', index=index)
+        elif len(y)==1 and len(y[0])==0 and isinstance(y[0], list): # single empty column in a matrix
+            return pd.Series(y[0], name='target', index=index, dtype=float)
+        elif len(y)==1 and isinstance(y[0], list): # single column in a matrix
+            return pd.Series(y[0], name='target', index=index, dtype=type(y[0][0]))
+        else:
+            raise ValueError('Unexpected input shape')
+    elif isinstance(y, pd.DataFrame):
+        if len(list(y))==0: # empty DataFrame
+            return pd.Series(name='target', index=index, dtype=float)
+        if len(list(y))==1: # a single column
+            return y.iloc[:, 0]
+        else:
+            raise ValueError('Unexpected input shape: %s' % (str(y.shape)))
+    else:
+        return pd.Series(y, name='target', index=index)  # this covers tuples and other directly convertible types
+    
+class SteveGeoTargetEncoder(BaseEstimator, TransformerMixin):
+    def __init__(self, upper_col=None, cols=None, min_samples_leaf=1, smoothing=1.0):
         #print("SteveEQPrepper: init")
-        self.min_num = min_num
-        self.level_3_counts = None
+        self.upper_col = upper_col
+        self.cols = cols
+        self.ordinal_encoder = None
+        self.min_samples_leaf = min_samples_leaf
+        self.smoothing = float(smoothing)  # Make smoothing a float so that python 2 does not treat as integer division
+        self._dim = None
+        self.mapping = None
+        self.handle_unknown = 'value'
+        self.handle_missing = 'value'
+        self._mean = None
+        self.feature_names = None
+        self.verbose = 1
 
     def fit(self, X, y=None):
         #print("SteveEQPrepper: fit")
-        self.level_3_counts = X.groupby('geo_level_3_id').agg({'geo_level_3_id': 'count'})
+        #self.level_3_counts = X.groupby('geo_level_3_id').agg({'geo_level_3_id': 'count'})
+        
+        X = convert_input(X)
+        y = convert_input_vector(y, X.index)
+        
+        if X.shape[0] != y.shape[0]:
+            raise ValueError("The length of X is " + str(X.shape[0]) + " but length of y is " + str(y.shape[0]) + ".")
+
+        self._dim = X.shape[1]
+        
+        
+        # if columns aren't passed, just use every string column
+        if self.cols is None:
+            self.cols = get_obj_cols(X)
+        else:
+            self.cols = convert_cols_to_list(self.cols)
+            
+        print("cols = {}".format(self.cols))
+
+        if self.handle_missing == 'error':
+            if X[self.cols].isnull().any().any():
+                raise ValueError('Columns to be encoded can not contain null')
+
+        self.ordinal_encoder = ce.OrdinalEncoder(
+            cols=self.cols,
+            handle_unknown='value',
+            handle_missing='value'
+        )
+        self.ordinal_encoder = self.ordinal_encoder.fit(X)
+        X_ordinal = self.ordinal_encoder.transform(X)
+        self.mapping = self.fit_target_encoding(X_ordinal, y)
+        
+        X_temp = self.transform(X)
+        self.feature_names = list(X_temp.columns)
+
         return self
+    
+    
+    def fit_target_encoding(self, X, y):
+        mapping = {}
+
+        for switch in self.ordinal_encoder.category_mapping:
+            col = switch.get('col')
+            values = switch.get('mapping')
+            
+            _X = X.copy()
+            _X['__target__'] = y
+
+            #self.level_3_counts = X.groupby('geo_level_3_id').agg({'geo_level_3_id': 'count'})
+            #prior = 
+            prior = self._mean = y.mean()
+            
+
+            stats = y.groupby(X[col]).agg(['count', 'mean'])
+            print("")
+            print("col={}\n values={}\n prior={}\n stats={}".format(col, values, prior, stats))
+            print(y.head())
+
+            smoove = 1 / (1 + np.exp(-(stats['count'] - self.min_samples_leaf) / self.smoothing))
+            print("smoove={}".format(smoove))
+            smoothing = prior * (1 - smoove) + stats['mean'] * smoove
+            print("smoothing={}".format(smoothing))
+            smoothing[stats['count'] == 1] = prior
+            print("smoothing={}".format(smoothing))
+
+            if self.handle_unknown == 'return_nan':
+                smoothing.loc[-1] = np.nan
+            elif self.handle_unknown == 'value':
+                smoothing.loc[-1] = prior
+
+            if self.handle_missing == 'return_nan':
+                smoothing.loc[values.loc[np.nan]] = np.nan
+            elif self.handle_missing == 'value':
+                smoothing.loc[-2] = prior
+
+            mapping[col] = smoothing
+
+        return mapping
 
     def transform(self, X, y=None):
-        #print("SteveEQPrepper: tranform")
-        _X = X.copy()
+        if self.handle_missing == 'error':
+            if X[self.cols].isnull().any().any():
+                raise ValueError('Columns to be encoded can not contain null')
 
-        def f(row, level_3_counts, min_num):
-            geo_level_1_id = row['geo_level_1_id']
-            geo_level_2_id = row['geo_level_2_id']
-            geo_level_3_id = row['geo_level_3_id']
-            return int(geo_level_3_id)
-            if geo_level_3_id not in level_3_counts.index or level_3_counts.loc[geo_level_3_id][0] < min_num:
-                return geo_level_2_id
-            else:
-                return geo_level_3_id
+        if self._dim is None:
+            raise ValueError('Must train encoder before it can be used to transform data.')
 
-        _X['geo_level_3_id'] = _X.apply(f, args=(self.level_3_counts, self.min_num), axis=1)
+        # then make sure that it is the right size
+        if X.shape[1] != self._dim:
+            raise ValueError('Unexpected input dimension %d, expected %d' % (X.shape[1], self._dim,))
 
-        return _X
+        # if we are encoding the training data, we have to check the target
+        if y is not None:
+            y = convert_input_vector(y, X.index)
+            if X.shape[0] != y.shape[0]:
+                raise ValueError("The length of X is " + str(X.shape[0]) + " but length of y is " + str(y.shape[0]) + ".")
+
+        if not list(self.cols):
+            return X
+
+        X = self.ordinal_encoder.transform(X)
+
+        if self.handle_unknown == 'error':
+            if X[self.cols].isin([-1]).any().any():
+                raise ValueError('Unexpected categories found in dataframe')
+
+        X = self.target_encode(X)
+
+        return X
+    
+    def target_encode(self, X_in):
+        X = X_in.copy(deep=True)
+
+        for col in self.cols:
+            X[col] = X[col].map(self.mapping[col])
+
+        return X
+    
     
     
 class SteveCategoryImputer(BaseEstimator, TransformerMixin):
@@ -168,7 +379,24 @@ class SteveCategoryImputer(BaseEstimator, TransformerMixin):
         _X[self.cat_cols] = _X[self.cat_cols].astype('category')
         
         return _X
+    
+class SteveEncoder(BaseEstimator, TransformerMixin):
+    def __init__(self, cols=None, encoder=None):
+        self.cols = cols
+        self.encoder = encoder
+        
+    def fit(self, X, y=None):
+        self.encoder.fit(X[self.cols], y)
+        return self
 
+    def transform(self, X, y=None):
+        _X = X.copy()
+        
+        _new_cols = self.encoder.transform(_X[self.cols])
+        _new_cols = pd.DataFrame(_new_cols, columns=["{}_enc".format(i) for i in range(_new_cols.shape[1])])
+        _X = pd.concat([_X, _new_cols], axis=1, ignore_index=False)
+        
+        return _X
     
 class SteveNumericImputer(BaseEstimator, TransformerMixin):
     def __init__(self, num_cols=None, imputer=None):
@@ -187,6 +415,24 @@ class SteveNumericImputer(BaseEstimator, TransformerMixin):
         # Preserve data types of original dataframe
         for col in self.num_cols:
             _X[col] =  _X[col].astype(X.dtypes[col])
+        
+        return _X
+
+class SteveNumericCapper(BaseEstimator, TransformerMixin):
+    # Caps a given column to a certain number
+    # E.g., any value greater becomes the max
+    def __init__(self, num_cols=None, max_val=0):
+        self.num_cols = num_cols
+        self.max_val = max_val
+        
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        _X = X.copy()
+        
+        for col in self.num_cols:
+            _X[col] =  _X[col].apply(lambda x: x if x <= self.max_val else self.max_val)
         
         return _X
  
@@ -286,7 +532,7 @@ class SteveMissingIndicator(BaseEstimator, TransformerMixin):
     #def __init__(self, cols=[], col_types=[], cols_pattern=None, drop_orig=False, transformer=None, prefix="trans_", **init_params):
     
 class SteveAutoFeatLight(BaseEstimator, TransformerMixin):
-    def __init__(self, num_cols=[], compute_ratio=False, compute_product=True, scale=False):
+    def __init__(self, num_cols=[], compute_ratio=True, compute_product=True, scale=False):
         self.num_cols = num_cols
         self.compute_ratio = compute_ratio
         self.compute_product = compute_product
@@ -367,13 +613,26 @@ class SteveConstantDateDiffer(BaseEstimator, TransformerMixin):
         return _X
     
 class SteveFeatureDropper(BaseEstimator, TransformerMixin):
-    def __init__(self, cols=[]):
+    # inverse = True means drop all but
+    # "like" will include column names like the pattern
+    def __init__(self, cols=[], like=None, inverse=False):
         self.cols = cols
+        self.like = like
+        self.inverse = inverse
     def fit(self, X, y=None):
+        self._cols = self.cols
+        if self.like is not None:
+            for col in X.columns.values:
+                if self.like in col:
+                    self._cols.append(col)
+            
         return self
     def transform(self, X, y=None):
         _X = X.copy()
-        _X = _X.drop(self.cols, axis=1)
+        if self.inverse:
+            _X = _X[self._cols]
+        else:
+            _X = _X.drop(self._cols, axis=1)
         return _X
     
 class SteveFeatureTyper(BaseEstimator, TransformerMixin):
@@ -449,7 +708,7 @@ def get_data_types(df, id_col, target_col):
             cat_cols.append(c)
         elif is_numeric_dtype(df[c]):
             num_cols.append(c)
-        if is_binary(df[c]):
+        if is_binary(df[c]) and is_numeric_dtype(df[c]):
             bin_cols.append(c)
             
         if is_numeric_dtype(df[c]) and not is_binary(df[c]) and c not in cat_cols:
