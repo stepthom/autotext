@@ -35,14 +35,16 @@ def summarize(dir, output_file):
     print("DEBUG: Found {} tune runs in {}.".format(len(run_files), dir))
 
     res = []
+    from json.decoder import JSONDecodeError
     for run_file in run_files:
         run = {}
         with open(run_file) as f:
 
             try:
                 run = json.load(f)
-            except:
+            except JSONDecodeError as e:
                 print("ERROR: cannot parse json file {}".format(run_file))
+                print(e)
                 continue
 
             args = run.get('args', {})
@@ -67,24 +69,23 @@ def summarize(dir, output_file):
                 #'drop_cols': data_sheet.get('drop_cols', ''),
                 #'custom_begin_funcs': data_sheet.get('custom_begin_funcs', ''),
                 #'custom_end_funcs': data_sheet.get('custom_end_funcs', ''),
-                'min_sample_leaf': run.get('os_steve_min_sample_leaf', ''),
-                'smoothing': run.get('os_steve_smoothing', ''),
-                'geo_id_set': args.get('geo_id_set', ''),
-                'keep_top_id': args.get('keep_top_id', ''),
-                'algo_set': args.get('algo_set', ''),
+                #'min_sample_leaf': run.get('os_steve_min_sample_leaf', ''),
+                #'smoothing': run.get('os_steve_smoothing', ''),
+                #'geo_id_set': args.get('geo_id_set', ''),
+                #'keep_top_id': args.get('keep_top_id', ''),
                 'endtime': run.get('endtime', ''),
+                'algo_set': run.get('algo_set', ''),
                 #'search_type': automl_settings.get('search_type', ''),
-                'time_budget': automl_settings.get('time_budget', ''),
-                'best_score': run.get('best_score', ''),
-                'best_loss': 1 - float(run.get('best_score', '0'))
+                #'time_budget': automl_settings.get('time_budget', ''),
+                'best_loss': run.get('best_loss', ''),
             })
 
     df = pd.DataFrame(res)
     if df.shape[0] > 0:
-        df = df.sort_values('best_score', ascending=False)
+        df = df.sort_values('best_loss', ascending=True)
         #df = df.drop_duplicates(subset = ['data_id', 'search_type', 'search_time', 'eval_metric', 'ensemble', 'best_estimator', 'val_score'])
         print(df.shape)
-        print(df[['runname', 'endtime', 'algo_set', 'keep_top_id', 'min_sample_leaf', 'smoothing', 'time_budget', 'best_score', 'best_loss']].head(20))
+        print(df[['runname', 'endtime', 'algo_set', 'best_loss']].head(20))
         df.to_csv(output_file, index=False)
         print("DEBUG: Wrote results file: {}".format(output_file))
     return
@@ -94,9 +95,9 @@ def main():
     parser = argparse.ArgumentParser()
     args = parser.parse_args()
 
-    summarize("pump/out", "pump/tune_results.csv")
-    summarize("h1n1/out", "h1n1/tune_results.csv")
-    summarize("seasonal/out", "seasonal/tune_results.csv")
+    #summarize("pump/out", "pump/tune_results.csv")
+    #summarize("h1n1/out", "h1n1/tune_results.csv")
+    #summarize("seasonal/out", "seasonal/tune_results.csv")
     summarize("earthquake/out", "earthquake/tune_results.csv")
 
 

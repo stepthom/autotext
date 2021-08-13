@@ -549,7 +549,11 @@ class SteveAutoFeatLight(BaseEstimator, TransformerMixin):
         _new_cols = self.autofeat.transform(_X[self.num_cols])
         # Autofit will create duplicate columns - remove
         _new_cols = _new_cols.drop(self.num_cols, axis=1)
-        
+       
+        print("SteveautoFeatLight: Column names:")
+        for i in range(_new_cols.shape[1]):
+            print("i={}, col={}".format(i, _new_cols.columns[i]))
+            
         # Rename the columns
         _new_cols.columns = ["{}_autofeat".format(i) for i in range(_new_cols.shape[1])]
            

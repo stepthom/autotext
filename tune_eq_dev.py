@@ -42,6 +42,7 @@ def main():
     parser.add_argument('--normalize', type=int, default=0)
     parser.add_argument('--sample-frac', type=float, default=1.0)
     parser.add_argument('--ensemble', type=int, default=0)
+    parser.add_argument('--run-type', type=str, default="flaml")
     parser.add_argument('--metric', type=str, default="micro_f1")
 
     args = parser.parse_args()
@@ -89,6 +90,8 @@ def main():
         estimator_list = ['xgboost']
     elif args.algo_set == 3:
         estimator_list = ['catboost']
+    elif args.algo_set == 4:
+        estimator_list = ['rf']
 
     X = train_df.drop([id_col, target_col], axis=1)
     y = train_df[target_col]
@@ -137,8 +140,6 @@ def main():
     print("X_test head:")
     print(X_test.head().T)
 
-    results = {}
-   
     runname = ""
     if exp:
         runname = exp.get_key()
@@ -146,55 +147,60 @@ def main():
         runname = str(uuid.uuid4())
     run_fn = os.path.join(out_dir, "tune_eq_{}.json".format(runname))
     print("tune_eq: Run name: {}".format(runname))
-
-    os.environ['OS_STEVE_MIN_SAMPLE_LEAF'] = str(args.min_sample_leaf)
-    os.environ['OS_STEVE_SMOOTHING'] = str(args.smoothing)
-
-    results['runname'] = runname
-    results['args'] = vars(args)
     
-    starttime = datetime.datetime.now()
-
-    automl_settings = {
-        "time_budget": args.time_budget,
-        "task": 'classification',
-        "n_jobs": 5,
-        "estimator_list": estimator_list,
-        "eval_method": "cv",
-        "n_splits": 3,
-        "metric": args.metric,
-        "ensemble": False,
-    }
-    automl_config = {
-        "comet_exp": exp,
-        "verbose": 1,
-        "log_training_metric": True,
-        "model_history": False,
-        "log_file_name": "logs/flaml-{}.log".format(runname),
-    }
-   
-    # Log some things before fit(), to more-easily monitor runs
+    
     if exp is not None:
         exp.log_other('train_fn', train_fn)
         exp.log_other('test_fn', test_fn)
         exp.log_table('X_head.csv', X.head())
         exp.log_table('y_head.csv', y.head())
         exp.log_parameters(vars(args))
-        exp.log_parameters(automl_settings)
+
+    starttime = datetime.datetime.now()
+    feat_imp = None
+    if args.run_type == "flaml":
+        os.environ['OS_STEVE_MIN_SAMPLE_LEAF'] = str(args.min_sample_leaf)
+        os.environ['OS_STEVE_SMOOTHING'] = str(args.smoothing)
+
+        automl_settings = {
+            "time_budget": args.time_budget,
+            "task": 'classification',
+            "n_jobs": 5,
+            "estimator_list": estimator_list,
+            "eval_method": "cv",
+            "n_splits": 3,
+            "metric": args.metric,
+            "ensemble": False,
+        }
+        automl_config = {
+            "comet_exp": exp,
+            "verbose": 1,
+            "log_training_metric": True,
+            "model_history": False,
+            "log_file_name": "logs/flaml-{}.log".format(runname),
+        }
+
+        # Log some things before fit(), to more-easily monitor runs
+        if exp is not None:
+            exp.log_parameters(automl_settings)
+
+        clf = AutoML()
+        clf.fit(X, y, **automl_config, **automl_settings)
+        best_loss = clf.best_loss
         
-    clf = AutoML()
-    clf.fit(X, y, **automl_config, **automl_settings)
+        print("Best model")
+        bm = clf.best_model_for_estimator(clf.best_estimator)
+        print(bm.model)
+        feature_names = bm.feature_names_
+        feat_imp =  pd.DataFrame({'Feature': feature_names, 'Importance': bm.model.feature_importances_}).sort_values('Importance', ascending=False)
+        print("Feature importances")
+        print(feat_imp.head())
+        
+    else:
+        pass
 
     endtime = datetime.datetime.now()
     duration = (endtime - starttime).seconds
-    #results['automl_settings'] =  automl_settings
-    results['best_score'] =  1 - clf.best_loss
-    results['best_config'] =  clf.best_config
-    results['best_estimator'] =  str(clf.best_estimator)
-    results['endtime'] = str(endtime)
-   
-    print("Run name: {}".format(runname))
-    print("Run file name: {}".format(run_fn))
 
     preds = clf.predict(X_test)
     preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
@@ -213,30 +219,29 @@ def main():
     probas_df.to_csv(probas_fn, index=False)
     print("tune_eq: Wrote probas file: {}".format(probas_fn))
 
+    results = {}
+    results['runname'] = runname
     results['preds_fn'] = preds_fn
     results['probas_fn'] = probas_fn
+    results['endtime'] = str(endtime)
+    results['algo_set'] = args.algo_set
+    results['best_loss'] =  best_loss
     dump_json(run_fn, results)
    
-    
-    print("Best model")
-    bm = clf.best_model_for_estimator(clf.best_estimator)
-    print(type(bm))
-    print(bm)
-    print(bm.estimator_class)
-    print(bm.model)
-    feature_names = bm.feature_names_
-    feat_imp =  pd.DataFrame({'Feature': feature_names, 'Importance': bm.model.feature_importances_}).sort_values('Importance', ascending=False)
-    print("Feature importances")
-    print(feat_imp.head())
-    
     if exp is not None:
         exp.log_metric("duration", duration)
-        exp.log_metric("best_config_train_time", clf.best_config_train_time)
-        exp.log_table('feat_imp.csv', feat_imp)
+        
+        if hasattr(clf, "best_config_train_train"):
+            exp.log_metric("best_config_train_time", clf.best_config_train_time)
+        
+        if feat_imp is not None:
+            exp.log_table('feat_imp.csv', feat_imp)
 
-        #exp.log_metric(name="best_estimator", value=clf.best_estimator)
-        #exp.log_asset_data(clf.best_config, name="best_config")
-        exp.log_text(clf.best_config)
+        if hasattr(clf, "best_config"):
+            exp.log_text(clf.best_config)
+            
+        if hasattr(clf, "best_estimator"):
+            exp.log_text(clf.best_model_for_estimator(clf.best_estimator).model)
 
 if __name__ == "__main__":
     main()
