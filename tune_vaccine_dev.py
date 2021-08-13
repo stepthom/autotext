@@ -35,37 +35,54 @@ from SteveHelpers import SteveCategoryCoalescer
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--enable-comet', type=int, default=1)
-    parser.add_argument('--geo-id-set', type=int, default=3)
-    parser.add_argument('--algo-set', type=int, default=1)
-    parser.add_argument('--n-hidden', type=int, default=4)
-    parser.add_argument('--dim-hidden', type=int, default=2)
-    parser.add_argument('--smooth-marginals', type=int, default=0)
-    parser.add_argument('--min-sample-leaf', type=int, default=5)
-    parser.add_argument('--time-budget', type=int, default=60)
-    parser.add_argument('--smoothing', type=float, default=10.0)
-    parser.add_argument('--autofeat', type=int, default=0)
-    parser.add_argument('--normalize', type=int, default=0)
     parser.add_argument('--sample-frac', type=float, default=1.0)
     parser.add_argument('--ensemble', type=int, default=0)
     parser.add_argument('--run-type', type=str, default="flaml")
-    parser.add_argument('--metric', type=str, default="micro_f1")
+    parser.add_argument('--metric', type=str, default="roc_auc")
+    parser.add_argument('--time-budget', type=int, default=60)
+    parser.add_argument('--target-col', type=str, default="h1n1_vaccine")
+    
+    parser.add_argument('--corex', type=int, default=-1)
+    
     parser.add_argument('--cat-encoder', type=int, default=1)
+    
+    parser.add_argument('--min-sample-leaf', type=int, default=5)
+    parser.add_argument('--smoothing', type=float, default=10.0)
+    
+    parser.add_argument('--autofeat', type=int, default=0)
+    
+    parser.add_argument('--normalize', type=int, default=0)
+   
+
+    parser.add_argument('--algo-set', type=int, default=1)
+    
 
     args = parser.parse_args()
 
     print("Command line arguments:")
     print(vars(args))
 
-    id_col = 'building_id'
-    target_col = 'damage_grade'
-    out_dir = 'earthquake/out'
+    id_col = 'respondent_id'
+    target_col = 'h1n1_vaccine'
+    out_dir = 'h1n1/out'
     data_id = '000'
+    train_fn = "h1n1/vaccine_h1n1_train.csv"
+    test_fn = "h1n1/vaccine_h1n1_test.csv"
+    
+    if args.target_col == "seasonal_vaccine":
+        id_col = 'respondent_id'
+        target_col = 'seasonal_vaccine'
+        out_dir = 'seasonal/out'
+        data_id = '000'
+        train_fn = "seasonal/vaccine_seasonal_train.csv"
+        test_fn = "seasonal/vaccine_seasonal_test.csv"
+        
 
     # Create an experiment with your api key
     exp=None
     if args.enable_comet == 1:
         exp = Experiment(
-            project_name="eq1",
+            project_name=args.target_col,
             workspace="stepthom",
             parse_args=False,
             auto_param_logging=False,
@@ -73,21 +90,11 @@ def main():
             log_graph=False
         )
     
-    train_fn =  'earthquake/earthquake_train.csv'
-    test_fn =  'earthquake/earthquake_test.csv'
     train_df  = pd.read_csv(train_fn)
     test_df  = pd.read_csv(test_fn)
     if args.sample_frac < 1.0:
         train_df  = train_df.sample(frac=args.sample_frac, random_state=3).reset_index(drop=True)
     
-
-    geo_id_set = []
-    if args.geo_id_set == 1:
-        geo_id_set = ['geo_level_1_id']
-    elif args.geo_id_set == 2:
-        geo_id_set = ['geo_level_1_id', 'geo_level_2_id']
-    else:
-        geo_id_set = ['geo_level_1_id', 'geo_level_2_id', 'geo_level_3_id']
 
     estimator_list = ['lgbm']
     if args.algo_set == 1:
@@ -98,50 +105,44 @@ def main():
         estimator_list = ['catboost']
     elif args.algo_set == 4:
         estimator_list = ['rf']
-    elif args.algo_set == 5:
-        estimator_list = ['extra_tree']
 
     X = train_df.drop([id_col, target_col], axis=1)
     y = train_df[target_col]
     X_test = test_df.drop([id_col], axis=1)
 
-    prep1 = Pipeline([
-        ('typer', SteveFeatureTyper(cols=geo_id_set, typestr='category'))
-    ])
-
-    prep1.fit(X)
-    X = prep1.transform(X)
-    X_test = prep1.transform(X_test)
-
     cat_cols, num_cols, bin_cols, float_cols, date_cols = get_data_types(X, id_col, target_col)
 
     steps = []
-
-    if False and args.n_hidden >= 1:
-        steps.append(('corex', SteveCorexWrapper(bin_cols, n_hidden=args.n_hidden)))
+   
+    steps.append(('missing_indicator', SteveMissingIndicator(num_cols)))
+    steps.append(('num_imputer', SteveNumericImputer(num_cols,  SimpleImputer(missing_values=np.nan, strategy="median"))))
+    
+    if args.corex >= 1:
+        steps.append(('typer', SteveFeatureTyper(bin_cols, typestr='int64')))
+        steps.append(('corex', SteveCorexWrapper([col for col in bin_cols if "_missing" not in col], n_hidden=args.corex)))
         steps.append(('dropper', SteveFeatureDropper(bin_cols)))
-
+        #steps.append(('dropper', SteveFeatureDropper(like='_corex', inverse=True)))
+        
+    steps.append(('cat_impute', SteveCategoryImputer(cat_cols)))
+    steps.append(('cat_smush', SteveCategoryCoalescer(keep_top=25, cat_cols=cat_cols)))
+       
     if args.cat_encoder == 1:
         pass
     elif args.cat_encoder == 2:
-        _cat_cols = list(set(cat_cols) - set(geo_id_set))
-        steps.append(('cat_encoder', SteveEncoder(cols=_cat_cols, 
+        steps.append(('cat_encoder', SteveEncoder(cols=cat_cols, 
                       encoder=OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32))))
-        steps.append(('dropper', SteveFeatureDropper(_cat_cols)))
+        steps.append(('dropper', SteveFeatureDropper(cat_cols)))
     elif args.cat_encoder == 3:
-        _cat_cols = list(set(cat_cols) - set(geo_id_set))
-        steps.append(('cat_encoder', SteveEncoder(cols=_cat_cols,
+        steps.append(('cat_encoder', SteveEncoder(cols=cat_cols,
                        encoder=OneHotEncoder(handle_unknown='ignore', sparse=False, dtype=np.int32))))
-        steps.append(('dropper', SteveFeatureDropper(_cat_cols)))
-
-    steps.append(('num_capper', SteveNumericCapper(num_cols=['age'], max_val=30)))
-
+        steps.append(('dropper', SteveFeatureDropper(cat_cols)))
+    
     if args.autofeat == 1:
         steps.append(('num_autofeat', SteveAutoFeatLight(float_cols)))
-
+        
     if args.normalize == 1:
         steps.append(('num_normalizer', SteveNumericNormalizer(float_cols, drop_orig=True)))
-
+    
     print(steps)
 
     preprocessor = Pipeline(steps)
@@ -156,6 +157,8 @@ def main():
     print(X.dtypes)
     print("X_test head:")
     print(X_test.head().T)
+    
+    print(list(X.columns))
 
     runname = ""
     if exp:

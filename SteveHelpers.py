@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import os
 import sys
+import re
 
 import json
 import datetime
@@ -393,7 +394,13 @@ class SteveEncoder(BaseEstimator, TransformerMixin):
         _X = X.copy()
         
         _new_cols = self.encoder.transform(_X[self.cols])
-        _new_cols = pd.DataFrame(_new_cols, columns=["{}_enc".format(i) for i in range(_new_cols.shape[1])])
+        colnames = ["{}_enc".format(i) for i in range(_new_cols.shape[1])]
+        if hasattr(self.encoder, "get_feature_names"):
+            colnames = self.encoder.get_feature_names(self.cols)
+            
+        # Make sure no weird values snuck in; LGBM will complain
+        colnames = [re.sub('[^A-Za-z0-9_]+', 'J', x) for x in colnames]
+        _new_cols = pd.DataFrame(_new_cols, columns=colnames)
         _X = pd.concat([_X, _new_cols], axis=1, ignore_index=False)
         
         return _X
