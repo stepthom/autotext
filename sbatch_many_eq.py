@@ -8,8 +8,8 @@ from itertools import product
 
 def main():
 
-    geo_id_sets = [3, 2]
-    algo_sets = [1, 2, 3]
+    geo_id_sets = [3]
+    algo_sets = [1, 2]
     min_sample_leafs = [1, 3, 5]
     smoothings = [0.1, 1.0, 10]
     n_hiddens = [6]
@@ -47,7 +47,7 @@ def main():
             "#SBATCH --job-name=TuneEQ",
             "#SBATCH --cpus-per-task=10"  ,
             "#SBATCH --mem=30gb",
-            "#SBATCH --time=20:00:00",
+            "#SBATCH --time=60:00:00",
             "#SBATCH --output=slurm/R-%x-%j.out",
 
             "",
@@ -55,7 +55,7 @@ def main():
             "which python",
             "source flaml_env_slurm/bin/activate",
             "which python",
-            "python tune_eq_dev.py --time-budget 50000 --geo-id-set {} --algo-set {} --min-sample-leaf {} --smoothing {} --n-hidden {} --smooth-marginals {} --autofeat {} --normalize {} --ensemble {}".format(
+            "python tune_eq_dev.py --time-budget 5000 --geo-id-set {} --algo-set {} --min-sample-leaf {} --smoothing {} --n-hidden {} --smooth-marginals {} --autofeat {} --normalize {} --ensemble {}".format(
                 geo_id_set, algo_set, min_sample_leaf, smoothing, n_hidden, smooth_marginals, autofeat, normalize, ensemble),
         ]
         )

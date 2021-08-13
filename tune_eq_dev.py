@@ -29,8 +29,9 @@ from SteveHelpers import SteveNumericCapper
 
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-g', '--geo-id-set', type=int, default=3)
-    parser.add_argument('-a', '--algo-set', type=int, default=1)
+    parser.add_argument('--enable-comet', type=int, default=1)
+    parser.add_argument('--geo-id-set', type=int, default=3)
+    parser.add_argument('--algo-set', type=int, default=1)
     parser.add_argument('--n-hidden', type=int, default=4)
     parser.add_argument('--dim-hidden', type=int, default=2)
     parser.add_argument('--smooth-marginals', type=int, default=0)
@@ -45,6 +46,7 @@ def main():
 
     args = parser.parse_args()
 
+    print("Command line arguments:")
     print(vars(args))
 
     id_col = 'building_id'
@@ -54,10 +56,15 @@ def main():
 
     # Create an experiment with your api key
     exp=None
-    exp = Experiment(
-        project_name="eq1",
-        workspace="stepthom",
-    )
+    if args.enable_comet == 1:
+        exp = Experiment(
+            project_name="eq1",
+            workspace="stepthom",
+            parse_args=False,
+            auto_param_logging=False,
+            auto_metric_logging=False,
+            log_graph=False
+        )
     
     train_fn =  'earthquake/earthquake_train.csv'
     test_fn =  'earthquake/earthquake_test.csv'
@@ -123,15 +130,20 @@ def main():
     X = preprocessor.transform(X)
     X_test = preprocessor.transform(X_test)
 
-    print("X head:", file=sys.stderr)
-    print(X.head().T, file=sys.stderr)
-    print("X dtypes:", file=sys.stderr)
-    print(X.dtypes, file=sys.stderr)
-    print("X_test head:", file=sys.stderr)
-    print(X_test.head().T, file=sys.stderr)
+    print("X head:")
+    print(X.head().T)
+    print("X dtypes:")
+    print(X.dtypes)
+    print("X_test head:")
+    print(X_test.head().T)
 
     results = {}
-    runname = str(uuid.uuid4())
+   
+    runname = ""
+    if exp:
+        runname = exp.get_key()
+    else:
+        runname = str(uuid.uuid4())
     run_fn = os.path.join(out_dir, "tune_eq_{}.json".format(runname))
     print("tune_eq: Run name: {}".format(runname))
 
@@ -145,21 +157,33 @@ def main():
 
     automl_settings = {
         "time_budget": args.time_budget,
-        "log_file_name": "logs/flaml-{}.log".format(runname),
         "task": 'classification',
         "n_jobs": 5,
         "estimator_list": estimator_list,
-        "model_history": False,
         "eval_method": "cv",
         "n_splits": 3,
         "metric": args.metric,
-        "log_training_metric": True,
-        "verbose": 1,
         "ensemble": False,
-        "comet_exp": exp,
     }
+    automl_config = {
+        "comet_exp": exp,
+        "verbose": 1,
+        "log_training_metric": True,
+        "model_history": False,
+        "log_file_name": "logs/flaml-{}.log".format(runname),
+    }
+   
+    # Log some things before fit(), to more-easily monitor runs
+    if exp is not None:
+        exp.log_other('train_fn', train_fn)
+        exp.log_other('test_fn', test_fn)
+        exp.log_table('X_head.csv', X.head())
+        exp.log_table('y_head.csv', y.head())
+        exp.log_parameters(vars(args))
+        exp.log_parameters(automl_settings)
+        
     clf = AutoML()
-    clf.fit(X, y, **automl_settings)
+    clf.fit(X, y, **automl_config, **automl_settings)
 
     endtime = datetime.datetime.now()
     duration = (endtime - starttime).seconds
@@ -192,25 +216,27 @@ def main():
     results['preds_fn'] = preds_fn
     results['probas_fn'] = probas_fn
     dump_json(run_fn, results)
+   
     
-    #exp.log_dataset_hash(X)
-    exp.log_parameter('train_fn', train_fn)
-    exp.log_parameter('test_fn', test_fn)
-    exp.log_parameters(vars(args))
-    #exp.log_parameters(automl_settings)
-    exp.log_parameter("runname", runname)
-    
-    #exp.log_metric("final_loss", clf.best_loss)
-    exp.log_metric("duration", duration)
-    exp.log_metric("best_config_train_time", clf.best_config_train_time)
-    
-    exp.log_asset_data(name="best_estimator", data=clf.best_estimator)
-    exp.log_asset_data(clf.best_config, name="best_config")
-    
-    print("best model")
-    bm = clf.best_model_for_estimator("lgbm")
+    print("Best model")
+    bm = clf.best_model_for_estimator(clf.best_estimator)
     print(type(bm))
     print(bm)
+    print(bm.estimator_class)
+    print(bm.model)
+    feature_names = bm.feature_names_
+    feat_imp =  pd.DataFrame({'Feature': feature_names, 'Importance': bm.model.feature_importances_}).sort_values('Importance', ascending=False)
+    print("Feature importances")
+    print(feat_imp.head())
+    
+    if exp is not None:
+        exp.log_metric("duration", duration)
+        exp.log_metric("best_config_train_time", clf.best_config_train_time)
+        exp.log_table('feat_imp.csv', feat_imp)
+
+        #exp.log_metric(name="best_estimator", value=clf.best_estimator)
+        #exp.log_asset_data(clf.best_config, name="best_config")
+        exp.log_text(clf.best_config)
 
 if __name__ == "__main__":
     main()
