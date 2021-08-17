@@ -1,5 +1,6 @@
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.simplefilter(action='ignore', category=UserWarning)
 # import comet_ml at the top of your file
 from comet_ml import Experiment
 import uuid
@@ -17,7 +18,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
 from sklearn.impute import SimpleImputer
 
-from flaml import AutoML
 
 from functools import partial
 
@@ -36,22 +36,35 @@ from SteveHelpers import SteveCategoryCoalescer
 
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    
+    # Comet params
     parser.add_argument('--enable-comet', type=int, default=1)
+    
+    # Prep/FE params
     parser.add_argument('--geo-id-set', type=int, default=3)
-    parser.add_argument('--algo-set', type=int, default=1)
     parser.add_argument('--n-hidden', type=int, default=4)
     parser.add_argument('--dim-hidden', type=int, default=2)
     parser.add_argument('--smooth-marginals', type=int, default=0)
     parser.add_argument('--min-sample-leaf', type=int, default=5)
-    parser.add_argument('--time-budget', type=int, default=60)
     parser.add_argument('--smoothing', type=float, default=10.0)
     parser.add_argument('--autofeat', type=int, default=0)
     parser.add_argument('--normalize', type=int, default=0)
     parser.add_argument('--sample-frac', type=float, default=1.0)
     parser.add_argument('--ensemble', type=int, default=0)
-    parser.add_argument('--run-type', type=str, default="flaml")
-    parser.add_argument('--metric', type=str, default="micro_f1")
     parser.add_argument('--cat-encoder', type=int, default=1)
+    
+    # Search Params
+    parser.add_argument('--run-type', type=str, default="flaml")
+    parser.add_argument('--time-budget', type=int, default=60)
+    parser.add_argument('--metric', type=str, default="micro_f1")
+    
+    # XGBoost/LGBM params
+    parser.add_argument('--algo-set', type=int, default=1)
+    parser.add_argument('--booster', type=str, default='gbdt')
+    parser.add_argument('--grow-policy', type=str, default='lossguide')
+    
+    # Optuna params
+    parser.add_argument('--sampler', type=str, default='base')
 
     args = parser.parse_args()
 
@@ -67,7 +80,7 @@ def main():
     exp=None
     if args.enable_comet == 1:
         exp = Experiment(
-            project_name="eq1",
+            project_name="eq2",
             workspace="stepthom",
             parse_args=False,
             auto_param_logging=False,
@@ -261,8 +274,10 @@ def main():
     starttime = datetime.datetime.now()
     feat_imp = None
     if args.run_type == "flaml":
+        from flaml import AutoML
         os.environ['OS_STEVE_MIN_SAMPLE_LEAF'] = str(args.min_sample_leaf)
         os.environ['OS_STEVE_SMOOTHING'] = str(args.smoothing)
+        os.environ['OS_STEVE_BOOSTING'] = str(args.booster)
        
         automl_settings = {
             "time_budget": args.time_budget,
@@ -304,74 +319,153 @@ def main():
         print("Feature importances")
         print(feat_imp.head())
 
-    elif args.run_type == "opt":
+    elif args.run_type == "optuna":
         from lightgbm import LGBMClassifier
+        import xgboost as xgb
         from sklearn.model_selection import train_test_split
         import category_encoders as ce
         from category_encoders.wrapper import PolynomialWrapper
         from sklearn.metrics import classification_report, f1_score
-        
-        params = {
-            "n_estimators":1239,
-             "num_leaves":772,
-             "min_child_samples":42,
-             "learning_rate":0.008946391199324397,
-             "subsample":0.8627473025492609,
-             "colsample_bytree":0.28502068330476027,
-             "reg_alpha":0.025620353309563408,
-             "reg_lambda":8.122050782004282
-        }
-        
-        
-        def calc_metrics(probas, weights):
-            #print(probas)
-        
-            probas_n = np.multiply(probas, weights)
-            preds = np.argmax(probas_n, axis=1) + 1
-            #print(classification_report(y_val, preds))
-            return f1_score(y_val, preds, average="micro")
-        
-        res = []
-        for cv_iter in range(10):
-            print("CV {}".format(cv_iter))
-        
-            X_train, X_val, y_train, y_val = train_test_split(X, y, random_state=cv_iter, stratify=y)
-            enc =  ce.wrapper.PolynomialWrapper(
-                    ce.target_encoder.TargetEncoder(handle_unknown="value", handle_missing="value", min_samples_leaf=3, smoothing=0.1))
+        from sklearn.preprocessing import LabelEncoder
+        from sklearn.metrics import log_loss, accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score, classification_report
+        from sklearn.model_selection import StratifiedKFold
+        import optuna
+        import time
+       
+        def objective(trial, X, y, booster="gbtree", grow_policy="lossguide"):
+           
+            upper = 4096
+            #upper = 64
+            num_boost_round = trial.suggest_int("num_boost_round", 4, upper, log=True)
+            max_leaves = trial.suggest_int("max_leaves", 4, upper, log=True)
+            min_child_weight = trial.suggest_loguniform("min_child_weight", 0.001, 128)
+            learning_rate = trial.suggest_loguniform("learning_rate", 1/1024, 1.0)
+            subsample = trial.suggest_float("subsample", 0.1, 1.0)
+            colsample_bylevel = trial.suggest_float("colsample_by_level", 0.01, 1.0)
+            colsample_bytree = trial.suggest_float("colsample_by_tree", 0.01, 1.0)
+            reg_alpha = trial.suggest_loguniform("reg_alpha", 1/1024, 1024)
+            reg_lambda = trial.suggest_loguniform("reg_lambda", 1/1024, 1024)
+            gamma = trial.suggest_loguniform("gamma", 1/1024, 128)
+            #booster = trial.suggest_categorical("booster", ["gbtree", "dart"])
+           
+            max_depth = 0
+            if grow_policy == "depthwise":
+                max_depth = trial.suggest_int("max_depth", 4, 32)
+            
+            xgb_params = {
+                  "max_leaves": max_leaves,
+                  "min_child_weight": min_child_weight,
+                  "learning_rate": learning_rate,
+                  "subsample": subsample,
+                  "colsample_bylevel": colsample_bylevel,
+                  "colsample_bytree": colsample_bytree,
+                  "reg_alpha": reg_alpha,
+                  "reg_lambda": reg_lambda,
+                  "gamma": gamma,
+                  "booster": booster,
+                  "max_depth": max_depth,
+                  "grow_policy": grow_policy,
+                  "tree_method": "hist",
+                  "n_jobs": 5,
+                  "objective": "multi:softprob",
+                  "eval_metric": "mlogloss",
+                  "verbosity": 1,
+                  "num_class": 3,
+            }
 
-            clf = LGBMClassifier(**params)
-            pipe = Pipeline([
-                ("cat_enc", enc),
-                ("clf", clf),
-            ])
+            label_transformer = LabelEncoder()
+            y = label_transformer.fit_transform(y)
+           
+            # Cross validation loop
+            skf = StratifiedKFold(n_splits=8, random_state=None, shuffle=False)
 
-            pipe.fit(X_train, y_train)
+            val_scores = []
+            train_scores = []
+            for train_index, val_index in skf.split(X, y):
+                
+                X_train, X_val = X.loc[train_index], X.loc[val_index]
+                y_train, y_val = y[train_index], y[val_index]
 
-            probas = pipe.predict_proba(X_val)
-            baseline_f1 = calc_metrics(probas, [1, 1, 1])
-            res.append({ 'i': 1, 'j': 1, 'k': 1, 'cv_iter': cv_iter, 'f1': baseline_f1, 'diff': 0 })
+                enc =  ce.wrapper.PolynomialWrapper(
+                        ce.target_encoder.TargetEncoder(handle_unknown="value", handle_missing="value", min_samples_leaf=3, smoothing=0.1))
 
-            for i in [1]:
-                for j in np.linspace(0.5, 1.5, num=15):
-                    for k in np.linspace(0.5, 1.5, num=15):
-                        f1 =  calc_metrics(probas, [i, j, k])
-                        res.append({
-                            'i': i,
-                            'j': j,
-                            'k': k,
-                            'cv_iter': cv_iter,
-                            'f1': f1,
-                            'diff': f1-baseline_f1,
-                        })
-        df = pd.DataFrame(res)
-        df = df.sort_values('diff', ascending=False)
-        print(df.head(15))
-        print(df.tail(5))
-        df.to_csv('logs/heatmap-all-{}.csv'.format(cv_iter), index=False)
-        grp = df.groupby(['i','j','k']).agg({'f1': 'describe', 'diff': 'describe'})
-        print(grp)
+                pipe = Pipeline([ ("cat_enc", enc), ])
 
+                pipe.fit(X_train, y_train)
 
+                _X_train = pipe.transform(X_train)
+                _X_val  = pipe.transform(X_val)
+
+                dtrain = xgb.DMatrix(_X_train, label=y_train)
+                dval   = xgb.DMatrix(_X_val)
+
+                start = time.time()
+                _model = xgb.train(params=xgb_params, dtrain=dtrain, num_boost_round=num_boost_round)
+                train_time = (time.time() - start)
+
+                y_pred_proba = _model.predict(dval, ntree_limit=num_boost_round)
+                y_pred = np.argmax(y_pred_proba,axis=1)
+                print(classification_report(y_val, y_pred, digits=4))
+
+                custom_metrics = {
+                    'val_log_loss':  log_loss(y_val, y_pred_proba),
+                    'val_micro_f1':  f1_score(y_val, y_pred, average="micro"),
+                    'val_macro_f1':  f1_score(y_val, y_pred, average="macro"),
+                    'val_weighted_f1':  f1_score(y_val, y_pred, average="weighted"),
+                    'val_roc_auc':  roc_auc_score(y_val, y_pred_proba, multi_class="ovo"),
+                }
+
+                y_pred_proba = _model.predict(dtrain, ntree_limit=num_boost_round)
+                y_pred = np.argmax(y_pred_proba,axis=1)
+
+                custom_metrics.update({
+                    'train_log_loss':  log_loss(y_train, y_pred_proba),
+                    'train_micro_f1':  f1_score(y_train, y_pred, average="micro"),
+                    'train_macro_f1':  f1_score(y_train, y_pred, average="macro"),
+                    'train_weighted_f1':  f1_score(y_train, y_pred, average="weighted"),
+                    'train_roc_auc':  roc_auc_score(y_train, y_pred_proba, multi_class="ovo"),
+                })
+                print(classification_report(y_train, y_pred, digits=4))
+
+                custom_metrics.update({
+                    "train_seconds": train_time,
+                    "step": trial.number,
+                })
+
+                print("Fold metrics:")
+                print(custom_metrics)
+
+                val_scores.append(custom_metrics['val_micro_f1'])
+                train_scores.append(custom_metrics['train_micro_f1'])
+                
+            if exp is not None:
+                exp.log_metric("mean_val_score", np.mean(val_scores), step=trial.number)
+                exp.log_metric("mean_train_score", np.mean(train_scores), step=trial.number)
+                exp.log_text(xgb_params, step=trial.number)
+                exp.log_text(num_boost_round, step=trial.number)
+                
+            print("Train Scores: {}".format(train_scores))
+            print("Val Scores: {}".format(val_scores))
+            return np.mean(val_scores)
+       
+        sampler = None
+        if args.sampler == "tpe":
+            sampler = optuna.samplers.TPESampler()
+        
+        study = optuna.create_study(study_name=runname, sampler=sampler, direction="maximize")
+        study.optimize(lambda trial: objective(trial, X, y, booster=args.booster, grow_policy=args.grow_policy, ), 
+                       n_trials=50, 
+                       gc_after_trial=True)
+        
+        print(study.best_params)
+        print(study.best_value)
+        print(study.best_trial)
+        print(study.trials_dataframe())
+        if exp is not None:
+            exp.log_table('optuna_trials.csv', study.trials_dataframe())
+            exp.log_figure('Opt history', optuna.visualization.plot_optimization_history(study))
+            exp.log_figure('Hyperparam importance', optuna.visualization.plot_param_importances(study))
+            
         return
     
     else:
