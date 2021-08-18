@@ -17,6 +17,18 @@ import datetime
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
 from sklearn.impute import SimpleImputer
+#from lightgbm import LGBMClassifier
+import xgboost as xgb
+import lightgbm as lgbm
+from sklearn.model_selection import train_test_split
+import category_encoders as ce
+from category_encoders.wrapper import PolynomialWrapper
+from sklearn.metrics import classification_report, f1_score
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import log_loss, accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score, classification_report
+from sklearn.model_selection import StratifiedKFold
+import optuna
+import time
 
 
 from functools import partial
@@ -54,17 +66,19 @@ def main():
     parser.add_argument('--cat-encoder', type=int, default=1)
     
     # Search Params
-    parser.add_argument('--run-type', type=str, default="flaml")
+    parser.add_argument('--run-type', type=str, default="optuna")
     parser.add_argument('--time-budget', type=int, default=60)
     parser.add_argument('--metric', type=str, default="micro_f1")
     
     # XGBoost/LGBM params
     parser.add_argument('--algo-set', type=int, default=1)
-    parser.add_argument('--booster', type=str, default='gbdt')
+    parser.add_argument('--booster', type=str, default='gbtree')
     parser.add_argument('--grow-policy', type=str, default='lossguide')
+    parser.add_argument('--scale-pos-weight', type=float, default=1.0)
     
     # Optuna params
-    parser.add_argument('--sampler', type=str, default='base')
+    parser.add_argument('--sampler', type=str, default='tpe')
+    parser.add_argument('--n-trials', type=int, default=100)
 
     args = parser.parse_args()
 
@@ -129,12 +143,8 @@ def main():
     X_test = prep1.transform(X_test)
 
     cat_cols, num_cols, bin_cols, float_cols, date_cols = get_data_types(X, id_col, target_col)
-
+    
     steps = []
-
-    if False and args.n_hidden >= 1:
-        steps.append(('corex', SteveCorexWrapper(bin_cols, n_hidden=args.n_hidden)))
-        steps.append(('dropper', SteveFeatureDropper(bin_cols)))
 
     if args.cat_encoder == 1:
         pass
@@ -156,21 +166,14 @@ def main():
 
     if args.normalize == 1:
         steps.append(('num_normalizer', SteveNumericNormalizer(float_cols, drop_orig=True)))
+        
+    enc =  ce.wrapper.PolynomialWrapper(
+            ce.target_encoder.TargetEncoder(handle_unknown="value", handle_missing="value", min_samples_leaf=1, smoothing=0.1, return_df=True))
+
+    steps.append(("cat_enc2", enc))
 
     print(steps)
-
-    preprocessor = Pipeline(steps)
-
-    preprocessor.fit(X)
-    X = preprocessor.transform(X)
-    X_test = preprocessor.transform(X_test)
-
-    print("X head:")
-    print(X.head().T)
-    print("X dtypes:")
-    print(X.dtypes)
-    print("X_test head:")
-    print(X_test.head().T)
+    pipe = Pipeline(steps)
 
     runname = ""
     if exp:
@@ -180,89 +183,6 @@ def main():
     run_fn = os.path.join(out_dir, "tune_eq_{}.json".format(runname))
     print("tune_eq: Run name: {}".format(runname))
     
-    def f1_micro_soft(_y_true, y_pred_proba):
-    
-        # Convert y_true to OHE
-        enc = OneHotEncoder(handle_unknown='ignore', sparse=False)
-        y_true = enc.fit_transform(np.array(_y_true).reshape(-1, 1))
-
-        #print(y_true)
-        #print(np.sum(y_true, axis=0))
-
-        tp = np.sum(y_pred_proba * y_true, axis=0)
-        fp = np.sum(y_pred_proba * (1 - y_true), axis=0)
-        fn = np.sum((1 - y_pred_proba) * y_true, axis=0)
-        soft_f1 = 2*tp / (2*tp + fn + fp + 1e-16)
-        micro_soft_f1 = np.average(soft_f1, weights=np.sum(y_true, axis=0)) 
-        macro_soft_f1 = np.average(soft_f1, weights=None) # average on all labels
-
-        #print(tp)
-        #print(fp)
-        #print(fn)
-        #print(soft_f1)
-        #print(micro_soft_f1)
-        #print(macro_soft_f1)
-        return macro_soft_f1
-        
-    
-    def custom_metric(X_val, y_val, estimator, labels, X_train, y_train, weight_val=None, weight_train=None, return_metric="micro_f1"):
-        from sklearn.metrics import log_loss, accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score, classification_report
-        import time
-        
-        start = time.time()
-        y_pred_proba = estimator.predict_proba(X_val)
-        y_pred = np.argmax(y_pred_proba,axis=1)
-        y_pred = estimator.predict(X_val)
-        pred_time = (time.time() - start) / len(X_val)
-        
-        class_report = classification_report(y_val, y_pred, sample_weight=weight_val, output_dict=True)
-        class_report_flat = pd.json_normalize(class_report, sep='_').to_dict(orient='records')[0]
-        class_report_flat = {'val_metric_' + str(key): val for key, val in class_report_flat.items()}
-        
-        custom_metrics = {
-            'val_metric_log_loss':  log_loss(y_val, y_pred_proba, labels=labels, sample_weight=weight_val),
-            'val_metric_micro_f1':  f1_score(y_val, y_pred, sample_weight=weight_val, average="micro"),
-            'val_metric_macro_f1':  f1_score(y_val, y_pred, sample_weight=weight_val, average="macro"),
-            'val_metric_weighted_f1':  f1_score(y_val, y_pred, sample_weight=weight_val, average="weighted"),
-            'val_metric_roc_auc':  roc_auc_score(y_val, y_pred_proba, sample_weight=weight_val, multi_class="ovo"),
-            'val_metric_micro_f1_soft':  f1_micro_soft(y_val, y_pred_proba),
-        }
-        custom_metrics.update(class_report_flat)
-        
-        y_pred_proba = estimator.predict_proba(X_train)
-        y_pred = np.argmax(y_pred_proba,axis=1)
-        y_pred = estimator.predict(X_train)
-        
-        class_report = classification_report(y_train, y_pred, sample_weight=weight_train, output_dict=True)
-        class_report_flat = pd.json_normalize(class_report, sep='_').to_dict(orient='records')[0]
-        class_report_flat = {'train_metric_' + str(key): val for key, val in class_report_flat.items()}
-       
-        custom_metrics.update({
-            'train_metric_log_loss':  log_loss(y_train, y_pred_proba, labels=labels, sample_weight=weight_train),
-            'train_metric_micro_f1':  f1_score(y_train, y_pred, sample_weight=weight_train, average="micro"),
-            'train_metric_macro_f1':  f1_score(y_train, y_pred, sample_weight=weight_train, average="macro"),
-            'train_metric_weighted_f1':  f1_score(y_train, y_pred, sample_weight=weight_train, average="weighted"),
-            'train_metric_roc_auc':  roc_auc_score(y_train, y_pred_proba, sample_weight=weight_train, multi_class="ovo"),
-            'train_metric_micro_f1_soft':  f1_micro_soft(y_train, y_pred_proba),
-        })
-        custom_metrics.update(class_report_flat)
-        
-        custom_metrics.update({
-            "pred_time": pred_time,
-        })
-      
-        val_loss = None
-        return_metric_name = "val_metric_{}".format(return_metric)
-        if return_metric_name == "val_metric_log_loss":
-            val_loss = custom_metrics[return_metric_name]
-        else:
-            val_loss = 1 - custom_metrics[return_metric_name]
-        return val_loss, custom_metrics
-   
-    # The below is so we can re-use the custom_metric code but return different things based on the command line arg "metric"
-    custom_metric_flaml = partial(custom_metric, return_metric=args.metric)
-
-
     if exp is not None:
         exp.log_other('train_fn', train_fn)
         exp.log_other('test_fn', test_fn)
@@ -286,7 +206,7 @@ def main():
             "estimator_list": estimator_list,
             "eval_method": "cv",
             "n_splits": 3,
-            "metric": custom_metric_flaml,
+            "metric": args.metric,
             "ensemble": False,
         }
         automl_config = {
@@ -311,6 +231,8 @@ def main():
         clf.fit(X, y, **automl_config, **automl_settings)
         best_loss = clf.best_loss
 
+        print("Best config")
+        bm = clf.best_model_for_estimator(clf.best_config)
         print("Best model")
         bm = clf.best_model_for_estimator(clf.best_estimator)
         print(bm.model)
@@ -320,23 +242,128 @@ def main():
         print(feat_imp.head())
 
     elif args.run_type == "optuna":
-        from lightgbm import LGBMClassifier
-        import xgboost as xgb
-        from sklearn.model_selection import train_test_split
-        import category_encoders as ce
-        from category_encoders.wrapper import PolynomialWrapper
-        from sklearn.metrics import classification_report, f1_score
-        from sklearn.preprocessing import LabelEncoder
-        from sklearn.metrics import log_loss, accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score, classification_report
-        from sklearn.model_selection import StratifiedKFold
-        import optuna
-        import time
-       
-        def objective(trial, X, y, booster="gbtree", grow_policy="lossguide"):
+        
+        def lgbm_objective(trial, X, y, booster="gbtree", scale_pos_weight=1):
            
             upper = 4096
-            #upper = 64
-            num_boost_round = trial.suggest_int("num_boost_round", 4, upper, log=True)
+            num_boost_round = 3500 # trial.suggest_int("num_boost_round", 4, upper, log=True)
+            num_leaves = trial.suggest_int("num_leaves", 4, upper, log=True)
+            min_data_in_leaf = trial.suggest_int("min_data_in_leaf", 2, 2**7, log=True)
+            min_child_weight = trial.suggest_loguniform("min_child_weight", 0.001, 128)
+            learning_rate = trial.suggest_loguniform("learning_rate", 1/1024, 1.0)
+            subsample = trial.suggest_float("subsample", 0.1, 1.0)
+            colsample_bylevel = trial.suggest_float("colsample_by_level", 0.01, 1.0)
+            colsample_bytree = trial.suggest_float("colsample_by_tree", 0.01, 1.0)
+            reg_alpha = trial.suggest_loguniform("reg_alpha", 1/1024, 1024)
+            reg_lambda = trial.suggest_loguniform("reg_lambda", 1/1024, 1024)
+            #gamma = trial.suggest_loguniform("gamma", 1/1024, 128)
+            extra_tree = trial.suggest_categorical("extra_tree", [True, False])
+            
+            bagging_freq = 0
+            bagging_fraction = 1.0
+            if booster=="rf":
+                bagging_freq = 5
+                bagging_fraction = trial.suggest_uniform("bagging_fraction", 1/1024, 1.0-(1/1024))
+                
+            params = {
+                  "num_leaves": num_leaves,
+                  "min_child_weight": min_child_weight,
+                  "min_data_in_leaf": min_data_in_leaf,
+                  "learning_rate": learning_rate,
+                  "subsample": subsample,
+                  "colsample_bynode": colsample_bylevel,
+                  "colsample_bytree": colsample_bytree,
+                  "reg_alpha": reg_alpha,
+                  "reg_lambda": reg_lambda,
+                  "bagging_freq": bagging_freq,
+                  "bagging_fraction": bagging_fraction,
+                  "extra_trees": extra_tree,
+                  #"gamma": gamma,
+                  "boosting": booster,
+                  "max_depth": -1,
+                  "n_jobs": 5,
+                  "objective": "multiclass",
+                  #"eval_metric": "mlogloss",
+                  "verbosity": 0,
+                  "num_class": 3,
+            }
+
+            label_transformer = LabelEncoder()
+            y = label_transformer.fit_transform(y)
+           
+            # Cross validation loop
+            skf = StratifiedKFold(n_splits=12, random_state=None, shuffle=False)
+
+            val_scores = []
+            train_scores = []
+            for train_index, val_index in skf.split(X, y):
+                X_train, X_val = X.loc[train_index], X.loc[val_index]
+                y_train, y_val = y[train_index], y[val_index]
+
+                pipe.fit(X_train, y_train)
+
+                _X_train = pipe.transform(X_train)
+                _X_val  = pipe.transform(X_val)
+
+                dtrain = lgbm.Dataset(_X_train, label=y_train)
+                dval   = lgbm.Dataset(_X_val, label=y_val)
+
+                start = time.time()
+                print("lgbm train..")
+                eval_r = {}
+                _model = lgbm.train(params=params, train_set=dtrain, num_boost_round=num_boost_round, 
+                                   valid_sets=[dval, dtrain],
+                                   valid_names=["val", "train"],
+                                   early_stopping_rounds=20,
+                                   evals_result=eval_r,
+                                   init_model=None)
+                train_time = (time.time() - start)
+                print("..done. {} secs".format(train_time))
+
+
+                y_pred_proba = _model.predict(_X_val)
+                y_pred = np.argmax(y_pred_proba,axis=1)
+                print(classification_report(y_val, y_pred, digits=4))
+
+                custom_metrics = {
+                    'val_log_loss':  log_loss(y_val, y_pred_proba),
+                    'val_micro_f1':  f1_score(y_val, y_pred, average="micro"),
+                }
+
+                y_pred_proba = _model.predict(_X_train)
+                y_pred = np.argmax(y_pred_proba,axis=1)
+
+                custom_metrics.update({
+                    'train_log_loss':  log_loss(y_train, y_pred_proba),
+                    'train_micro_f1':  f1_score(y_train, y_pred, average="micro"),
+                })
+                print(classification_report(y_train, y_pred, digits=4))
+
+                custom_metrics.update({
+                    "train_seconds": train_time,
+                    "step": trial.number,
+                })
+
+                print("Fold metrics:")
+                print(custom_metrics)
+
+                val_scores.append(custom_metrics['val_micro_f1'])
+                train_scores.append(custom_metrics['train_micro_f1'])
+                
+            if exp is not None:
+                exp.log_metric("mean_val_score", np.mean(val_scores), step=trial.number)
+                exp.log_metric("mean_train_score", np.mean(train_scores), step=trial.number)
+                exp.log_text(params, step=trial.number)
+                exp.log_text(num_boost_round, step=trial.number)
+                
+            print("Train Scores: {}".format(train_scores))
+            print("Val Scores: {}".format(val_scores))
+            return np.mean(val_scores)
+       
+        def xgb_objective(trial, X, y, booster="gbtree", grow_policy="lossguide", scale_pos_weight=1):
+           
+            upper = 4096
+            num_boost_round = 2500 # trial.suggest_int("num_boost_round", 4, upper, log=True)
             max_leaves = trial.suggest_int("max_leaves", 4, upper, log=True)
             min_child_weight = trial.suggest_loguniform("min_child_weight", 0.001, 128)
             learning_rate = trial.suggest_loguniform("learning_rate", 1/1024, 1.0)
@@ -365,6 +392,7 @@ def main():
                   "booster": booster,
                   "max_depth": max_depth,
                   "grow_policy": grow_policy,
+                  #"scale_pos_weight": scale_pos_weight,
                   "tree_method": "hist",
                   "n_jobs": 5,
                   "objective": "multi:softprob",
@@ -377,19 +405,13 @@ def main():
             y = label_transformer.fit_transform(y)
            
             # Cross validation loop
-            skf = StratifiedKFold(n_splits=8, random_state=None, shuffle=False)
+            skf = StratifiedKFold(n_splits=12, random_state=None, shuffle=False)
 
             val_scores = []
             train_scores = []
             for train_index, val_index in skf.split(X, y):
-                
                 X_train, X_val = X.loc[train_index], X.loc[val_index]
                 y_train, y_val = y[train_index], y[val_index]
-
-                enc =  ce.wrapper.PolynomialWrapper(
-                        ce.target_encoder.TargetEncoder(handle_unknown="value", handle_missing="value", min_samples_leaf=3, smoothing=0.1))
-
-                pipe = Pipeline([ ("cat_enc", enc), ])
 
                 pipe.fit(X_train, y_train)
 
@@ -397,33 +419,41 @@ def main():
                 _X_val  = pipe.transform(X_val)
 
                 dtrain = xgb.DMatrix(_X_train, label=y_train)
-                dval   = xgb.DMatrix(_X_val)
+                dval   = xgb.DMatrix(_X_val, label=y_val)
 
                 start = time.time()
-                _model = xgb.train(params=xgb_params, dtrain=dtrain, num_boost_round=num_boost_round)
+                print("xbg train..")
+                eval_r = {}
+                _model = xgb.train(params=xgb_params, dtrain=dtrain, num_boost_round=num_boost_round, 
+                                   evals=[(dtrain, "train"), (dval, "val")],
+                                   early_stopping_rounds=20,
+                                   evals_result=eval_r,
+                                   xgb_model=None)
                 train_time = (time.time() - start)
+                print("..done. {} secs".format(train_time))
 
-                y_pred_proba = _model.predict(dval, ntree_limit=num_boost_round)
+
+                y_pred_proba = _model.predict(dval, iteration_range=(0, _model.best_iteration))
                 y_pred = np.argmax(y_pred_proba,axis=1)
                 print(classification_report(y_val, y_pred, digits=4))
 
                 custom_metrics = {
                     'val_log_loss':  log_loss(y_val, y_pred_proba),
                     'val_micro_f1':  f1_score(y_val, y_pred, average="micro"),
-                    'val_macro_f1':  f1_score(y_val, y_pred, average="macro"),
-                    'val_weighted_f1':  f1_score(y_val, y_pred, average="weighted"),
-                    'val_roc_auc':  roc_auc_score(y_val, y_pred_proba, multi_class="ovo"),
+                    #'val_macro_f1':  f1_score(y_val, y_pred, average="macro"),
+                    #'val_weighted_f1':  f1_score(y_val, y_pred, average="weighted"),
+                    #'val_roc_auc':  roc_auc_score(y_val, y_pred_proba, multi_class="ovo"),
                 }
 
-                y_pred_proba = _model.predict(dtrain, ntree_limit=num_boost_round)
+                y_pred_proba = _model.predict(dtrain, iteration_range=(0, _model.best_iteration))
                 y_pred = np.argmax(y_pred_proba,axis=1)
 
                 custom_metrics.update({
                     'train_log_loss':  log_loss(y_train, y_pred_proba),
                     'train_micro_f1':  f1_score(y_train, y_pred, average="micro"),
-                    'train_macro_f1':  f1_score(y_train, y_pred, average="macro"),
-                    'train_weighted_f1':  f1_score(y_train, y_pred, average="weighted"),
-                    'train_roc_auc':  roc_auc_score(y_train, y_pred_proba, multi_class="ovo"),
+                    #'train_macro_f1':  f1_score(y_train, y_pred, average="macro"),
+                    #'train_weighted_f1':  f1_score(y_train, y_pred, average="weighted"),
+                    #'train_roc_auc':  roc_auc_score(y_train, y_pred_proba, multi_class="ovo"),
                 })
                 print(classification_report(y_train, y_pred, digits=4))
 
@@ -451,11 +481,28 @@ def main():
         sampler = None
         if args.sampler == "tpe":
             sampler = optuna.samplers.TPESampler()
+        elif args.sampler == "motpe":
+            sampler = optuna.samplers.MOTPESampler()
+        elif args.sampler == "random":
+            sampler = optuna.samplers.RandomSampler()
+        else:
+            pass
         
         study = optuna.create_study(study_name=runname, sampler=sampler, direction="maximize")
-        study.optimize(lambda trial: objective(trial, X, y, booster=args.booster, grow_policy=args.grow_policy, ), 
-                       n_trials=50, 
-                       gc_after_trial=True)
+        
+        if args.algo_set == 1:
+            study.optimize(lambda trial: lgbm_objective(trial, X, y, 
+                                                   booster=args.booster, 
+                                                   scale_pos_weight=args.scale_pos_weight,), 
+                           n_trials=args.n_trials, 
+                           gc_after_trial=True)
+        elif args.algo_set == 2:
+            study.optimize(lambda trial: xgb_objective(trial, X, y, 
+                                                   booster=args.booster, 
+                                                   grow_policy=args.grow_policy, 
+                                                   scale_pos_weight=args.scale_pos_weight,), 
+                           n_trials=args.n_trials, 
+                           gc_after_trial=True)
         
         print(study.best_params)
         print(study.best_value)
@@ -473,47 +520,6 @@ def main():
 
     endtime = datetime.datetime.now()
     duration = (endtime - starttime).seconds
-
-    preds = clf.predict(X_test)
-    preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
-    preds_fn = os.path.join(out_dir, "{}-{}-preds.csv".format(runname, data_id))
-    preds_df.to_csv(preds_fn, index=False)
-    print("tune_eq: Wrote preds file: {}".format(preds_fn))
-
-    probas = clf.predict_proba(X_test)
-    columns = None
-    if hasattr(clf, 'classes_'):
-        columns = clf.classes_
-    probas_df = pd.DataFrame(probas, columns=columns)
-    probas_df[id_col] = test_df[id_col]
-    probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
-    probas_fn = os.path.join(out_dir, "{}-{}-probas.csv".format(runname, data_id))
-    probas_df.to_csv(probas_fn, index=False)
-    print("tune_eq: Wrote probas file: {}".format(probas_fn))
-
-    results = {}
-    results['runname'] = runname
-    results['preds_fn'] = preds_fn
-    results['probas_fn'] = probas_fn
-    results['endtime'] = str(endtime)
-    results['algo_set'] = args.algo_set
-    results['best_loss'] =  best_loss
-    dump_json(run_fn, results)
-
-    if exp is not None:
-        exp.log_metric("duration", duration)
-
-        if hasattr(clf, "best_config_train_train"):
-            exp.log_metric("best_config_train_time", clf.best_config_train_time)
-
-        if feat_imp is not None:
-            exp.log_table('feat_imp.csv', feat_imp)
-
-        if hasattr(clf, "best_config"):
-            exp.log_text(clf.best_config)
-
-        if hasattr(clf, "best_estimator"):
-            exp.log_text(clf.best_model_for_estimator(clf.best_estimator).model)
 
 if __name__ == "__main__":
     main()

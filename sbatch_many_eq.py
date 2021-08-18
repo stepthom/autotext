@@ -7,47 +7,42 @@ from itertools import product
 # Then, call sbatch with the temporary bash script.
 
 def main():
+  
+    # xgboost
+    #boosters = ['gbtree']
+    
+    # lgbm
+    boosters = ['gbdt', 'rf', "dart"]
+    #grow_policys = ['depthwise', 'lossguide']
+    grow_policys =  ["lossguide"]
+    scale_pos_weights = [1.0]
+    samplers = ["tpe", "tpe", "random", "motpe"]
+    geo_id_sets = [2, 3]
+    
+    hours = 96
 
-    geo_id_sets = [3]
-    algo_sets = [1, 2]
-    min_sample_leafs = [1, 3, 5]
-    smoothings = [0.1, 1.0, 10]
-    n_hiddens = [6]
-    smooth_marginals = [0]
-
-    autofeats = [0, 1]
-
-    #normalizes = ["true", "false"]
-    normalizes = [0, 1]
-
-    ensembles = [0]
-    #ensembles = ["true"]
-
-    all_combos = list(product(geo_id_sets, algo_sets,
-                              min_sample_leafs, smoothings,
-                              n_hiddens, smooth_marginals,
-                              autofeats, normalizes,
-                              ensembles))
+    all_combos = list(product(boosters,
+                              grow_policys,
+                              scale_pos_weights,
+                              samplers,
+                              geo_id_sets,
+                             ))
 
     print("Number of combos: {}".format(len(all_combos)))
     for combo in all_combos:
 
-        geo_id_set = combo[0]
-        algo_set = combo[1]
-        min_sample_leaf = combo[2]
-        smoothing = combo[3]
-        n_hidden = combo[4]
-        smooth_marginals = combo[5]
-        autofeat = combo[6]
-        normalize = combo[7]
-        ensemble = combo[8]
+        booster = combo[0]
+        grow_policy = combo[1]
+        scale_pos_weight = combo[2]
+        sampler = combo[3]
+        geo_id_set = combo[4]
 
         string = '\n'.join([
             "#!/bin/bash",
-            "#SBATCH --job-name=TuneEQ",
+            "#SBATCH --job-name=OptunaEQ",
             "#SBATCH --cpus-per-task=10"  ,
-            "#SBATCH --mem=30gb",
-            "#SBATCH --time=60:00:00",
+            "#SBATCH --mem={}gb".format(80),
+            "#SBATCH --time={}:00:00".format(hours+1),
             "#SBATCH --output=slurm/R-%x-%j.out",
 
             "",
@@ -55,12 +50,17 @@ def main():
             "which python",
             "source flaml_env_slurm/bin/activate",
             "which python",
-            "python tune_eq_dev.py --time-budget 5000 --geo-id-set {} --algo-set {} --min-sample-leaf {} --smoothing {} --n-hidden {} --smooth-marginals {} --autofeat {} --normalize {} --ensemble {}".format(
-                geo_id_set, algo_set, min_sample_leaf, smoothing, n_hidden, smooth_marginals, autofeat, normalize, ensemble),
+            "python tune_eq_dev.py --algo-set 1 --n-trials 5000 --run-type optuna --geo-id-set {} --cat-encoder 2 --booster {} --grow-policy {} --scale-pos-weight {} --sampler {}".format(
+                geo_id_set,
+                booster,
+                grow_policy,
+                scale_pos_weight,
+                sampler,
+            ),
         ]
         )
 
-        f_name = 'tmp_scripts/tune_eq_tmp.sh'
+        f_name = 'tmp_scripts/tune_eq_optuna_tmp.sh'
         with open(f_name, "w") as text_file:
             text_file.write(string)
 

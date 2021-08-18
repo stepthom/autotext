@@ -77,9 +77,9 @@ def main():
 
         return out_fn, runname
     
-    do_pump = True
+    do_pump = False
     do_vaccine = False
-    do_earthquake = False
+    do_earthquake = True
 
     ##########################
     # H1N1
@@ -197,6 +197,7 @@ def main():
             #"pump/out/5b550076-1233-446b-89b3-fcef04f0f7da-0dbf0089-84ac-4766-a2db-c134a71fdc5b-probas.csv",
             #"pump/out/1885be1e-c97f-461e-9987-37a6b606999b-164243e4-e0c2-4e23-97df-de16337202d5-probas.csv",
             #"pump/out/f0b9059e-d307-41b4-aa94-4639524d8d4e-8ce5357a-ebae-4179-acab-30f0a08d3cc9-probas.csv"
+        ]
 
         )
 
@@ -216,16 +217,26 @@ def main():
     if do_earthquake:
 
         # One way is to just get the top N results from the results file
-        num_top = 9
-        results = pd.read_csv("earthquake/tune_results.csv").head(num_top)
-        probas_fns = list(results['probas_fn'])
+        #num_top = 9
+        #results = pd.read_csv("earthquake/tune_results.csv")
+        
+        #probas_fns = []
+        #probas_fns.extend(list(results[results['algo_set'] == 1].head(4)['probas_fn']))
+        #probas_fns.extend(list(results[results['algo_set'] == 2].head(4)['probas_fn']))
+        #probas_fns.extend(list(results[results['algo_set'] == 3].head(2)['probas_fn']))
+        #probas_fns.extend(list(results[results['algo_set'] == 4].head(1)['probas_fn']))
 
         # Another way is to manually list them
-        #probas_fns = ['earthquake/out/5db861e6-c1ce-40e3-91c9-f47c35c65354-411f5491-c145-4f4c-802f-9cc7d61ba51e-probas.csv',
-                     #'earthquake/out/d0b7a1ff-da01-41c6-ba80-51a01a407b63-dcc9ccbc-1449-403e-b681-c3320fbc636c-probas.csv',
-                     #'earthquake/out/a635d3c9-a808-4cd0-8f92-e8b6be858a96-9d83a7d7-a748-49a0-ace0-4149c54a3ffc-probas.csv',
-                     #'earthquake/out/c5bc08c3-0ec8-4d82-8dfa-dc96386e8a66-19ac3380-b87e-49ed-9736-82ad58c801f8-probas.csv',
-                     #'earthquake/out/3afbbef8-6cfb-41b4-a8bc-0f6751c47301-9e05f9ba-fb2e-48b4-8d9f-ce70b6950a8a-probas.csv',]
+        probas_fns = [
+            'earthquake/out/38db7a31-c5d0-493d-8a7d-967d13113f3b-000-probas.csv',
+            "earthquake/out.bak5/043bf80a-a4a3-436f-9038-0e315c4ae575-000-probas.csv",
+            "earthquake/out.bak5/49585b7d-4424-4527-ba91-15fd2c314760-000-probas.csv",
+            "earthquake/out.bak5/deb91b0a-8c78-4fa5-a764-91ccb1cb67b9-000-probas.csv",
+            "earthquake/out.bak5/f099cce8-b9db-4fc8-aa35-6debab99a044-000-probas.csv",
+            "earthquake/out.bak5/fdd5e45f-39c3-4ac6-aa85-dfeb2c6c973b-000-probas.csv"
+
+            
+        ]
 
         _, _ = combine_and_write(
             probas_fns,
