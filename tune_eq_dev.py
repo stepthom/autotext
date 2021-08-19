@@ -51,23 +51,19 @@ def main():
     
     # Comet params
     parser.add_argument('--enable-comet', type=int, default=1)
-    
     # Prep/FE params
     parser.add_argument('--geo-id-set', type=int, default=3)
-    parser.add_argument('--n-hidden', type=int, default=4)
-    parser.add_argument('--dim-hidden', type=int, default=2)
-    parser.add_argument('--smooth-marginals', type=int, default=0)
-    parser.add_argument('--min-sample-leaf', type=int, default=5)
-    parser.add_argument('--smoothing', type=float, default=10.0)
+    #parser.add_argument('--min-sample-leaf', type=int, default=5)
+    #parser.add_argument('--smoothing', type=float, default=10.0)
     parser.add_argument('--autofeat', type=int, default=0)
     parser.add_argument('--normalize', type=int, default=0)
     parser.add_argument('--sample-frac', type=float, default=1.0)
-    parser.add_argument('--ensemble', type=int, default=0)
+    #parser.add_argument('--ensemble', type=int, default=0)
     parser.add_argument('--cat-encoder', type=int, default=1)
     
     # Search Params
     parser.add_argument('--run-type', type=str, default="optuna")
-    parser.add_argument('--time-budget', type=int, default=60)
+    #parser.add_argument('--time-budget', type=int, default=60)
     parser.add_argument('--metric', type=str, default="micro_f1")
     
     # XGBoost/LGBM params
@@ -75,6 +71,7 @@ def main():
     parser.add_argument('--booster', type=str, default='gbtree')
     parser.add_argument('--grow-policy', type=str, default='lossguide')
     parser.add_argument('--scale-pos-weight', type=float, default=1.0)
+    parser.add_argument('--num-cv', type=int, default=12)
     
     # Optuna params
     parser.add_argument('--sampler', type=str, default='tpe')
@@ -94,7 +91,7 @@ def main():
     exp=None
     if args.enable_comet == 1:
         exp = Experiment(
-            project_name="eq2",
+            project_name="eq_searcher",
             workspace="stepthom",
             parse_args=False,
             auto_param_logging=False,
@@ -180,8 +177,9 @@ def main():
         runname = exp.get_key()
     else:
         runname = str(uuid.uuid4())
-    run_fn = os.path.join(out_dir, "tune_eq_{}.json".format(runname))
     print("tune_eq: Run name: {}".format(runname))
+
+    starttime = datetime.datetime.now()
     
     if exp is not None:
         exp.log_other('train_fn', train_fn)
@@ -191,7 +189,6 @@ def main():
         exp.log_parameters(vars(args))
         exp.log_asset('SteveHelpers.py')
 
-    starttime = datetime.datetime.now()
     feat_imp = None
     if args.run_type == "flaml":
         from flaml import AutoML
@@ -261,16 +258,14 @@ def main():
             
             bagging_freq = 0
             bagging_fraction = 1.0
-            if booster=="rf":
-                bagging_freq = 5
-                bagging_fraction = trial.suggest_uniform("bagging_fraction", 1/1024, 1.0-(1/1024))
+            #if booster=="rf":
+                #bagging_freq = 5
                 
             params = {
                   "num_leaves": num_leaves,
                   "min_child_weight": min_child_weight,
                   "min_data_in_leaf": min_data_in_leaf,
                   "learning_rate": learning_rate,
-                  "subsample": subsample,
                   "colsample_bynode": colsample_bylevel,
                   "colsample_bytree": colsample_bytree,
                   "reg_alpha": reg_alpha,
@@ -278,24 +273,24 @@ def main():
                   "bagging_freq": bagging_freq,
                   "bagging_fraction": bagging_fraction,
                   "extra_trees": extra_tree,
-                  #"gamma": gamma,
                   "boosting": booster,
                   "max_depth": -1,
                   "n_jobs": 5,
                   "objective": "multiclass",
-                  #"eval_metric": "mlogloss",
-                  "verbosity": 0,
+                  "verbosity": -1,
                   "num_class": 3,
+                  "seed": 77,
             }
 
             label_transformer = LabelEncoder()
             y = label_transformer.fit_transform(y)
            
             # Cross validation loop
-            skf = StratifiedKFold(n_splits=12, random_state=None, shuffle=False)
+            skf = StratifiedKFold(n_splits=args.num_cv, random_state=42, shuffle=True)
 
             val_scores = []
             train_scores = []
+            best_iterations = []
             for train_index, val_index in skf.split(X, y):
                 X_train, X_val = X.loc[train_index], X.loc[val_index]
                 y_train, y_val = y[train_index], y[val_index]
@@ -316,6 +311,7 @@ def main():
                                    valid_names=["val", "train"],
                                    early_stopping_rounds=20,
                                    evals_result=eval_r,
+                                   verbose_eval=50,
                                    init_model=None)
                 train_time = (time.time() - start)
                 print("..done. {} secs".format(train_time))
@@ -349,6 +345,11 @@ def main():
 
                 val_scores.append(custom_metrics['val_micro_f1'])
                 train_scores.append(custom_metrics['train_micro_f1'])
+                best_iterations.append(_model.best_iteration)
+                
+            print("Train Scores: {}".format(train_scores))
+            print("Val Scores: {}".format(val_scores))
+            print("Best iterations: {}".format(best_iterations))
                 
             if exp is not None:
                 exp.log_metric("mean_val_score", np.mean(val_scores), step=trial.number)
@@ -356,8 +357,45 @@ def main():
                 exp.log_text(params, step=trial.number)
                 exp.log_text(num_boost_round, step=trial.number)
                 
-            print("Train Scores: {}".format(train_scores))
-            print("Val Scores: {}".format(val_scores))
+            # Now train final model on full dataset; output preds
+            pipe.fit(X, y)
+            _X_train = pipe.transform(X)
+            y_train = y
+            _X_test  = pipe.transform(X_test)
+
+            dtrain = lgbm.Dataset(_X_train, label=y_train)
+            start = time.time()
+            print("lgbm train..")
+            eval_r = {}
+            num_boost_round_final = num_boost_round
+            if len(best_iterations) > 1:
+                num_boost_round_final = np.rint(np.mean(best_iterations)).astype(int)
+            num_boost_round_final = num_boost_round_final+300
+            print("num_boost_round_final: {}".format(num_boost_round_final))
+            _model = lgbm.train(params=params, train_set=dtrain, num_boost_round=num_boost_round_final,
+                               verbose_eval=50,
+                               init_model=None)
+            train_time = (time.time() - start)
+            print("..done. {} secs".format(train_time))
+
+            print("lgbm predict..")
+            probas = _model.predict(_X_test)
+            preds = np.argmax(probas, axis=1)
+            preds = label_transformer.inverse_transform(preds)
+
+            print("outputting files..")
+            preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
+            preds_fn = os.path.join(out_dir, "{}-{}-{}-preds.csv".format(runname, data_id, trial.number))
+            preds_df.to_csv(preds_fn, index=False)
+            print("tune_eq: Wrote preds file: {}".format(preds_fn))
+
+            probas_df = pd.DataFrame(probas, columns=["1", "2", "3"])
+            probas_df[id_col] = test_df[id_col]
+            probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
+            probas_fn = os.path.join(out_dir, "{}-{}-{}-probas.csv".format(runname, data_id, trial.number))
+            probas_df.to_csv(probas_fn, index=False)
+            print("tune_eq: Wrote probas file: {}".format(probas_fn))
+            
             return np.mean(val_scores)
        
         def xgb_objective(trial, X, y, booster="gbtree", grow_policy="lossguide", scale_pos_weight=1):
@@ -405,10 +443,11 @@ def main():
             y = label_transformer.fit_transform(y)
            
             # Cross validation loop
-            skf = StratifiedKFold(n_splits=12, random_state=None, shuffle=False)
+            skf = StratifiedKFold(n_splits=args.num_cv, random_state=42, shuffle=True)
 
             val_scores = []
             train_scores = []
+            best_iterations = []
             for train_index, val_index in skf.split(X, y):
                 X_train, X_val = X.loc[train_index], X.loc[val_index]
                 y_train, y_val = y[train_index], y[val_index]
@@ -424,10 +463,11 @@ def main():
                 start = time.time()
                 print("xbg train..")
                 eval_r = {}
-                _model = xgb.train(params=xgb_params, dtrain=dtrain, num_boost_round=num_boost_round, 
+                _model = xgb.train(params=xgb_params, dtrain=dtrain, num_boost_round=num_boost_round,
                                    evals=[(dtrain, "train"), (dval, "val")],
                                    early_stopping_rounds=20,
                                    evals_result=eval_r,
+                                   verbose_eval=50,
                                    xgb_model=None)
                 train_time = (time.time() - start)
                 print("..done. {} secs".format(train_time))
@@ -467,6 +507,12 @@ def main():
 
                 val_scores.append(custom_metrics['val_micro_f1'])
                 train_scores.append(custom_metrics['train_micro_f1'])
+                best_iterations.append(_model.best_iteration)
+                
+                
+            print("Train Scores: {}".format(train_scores))
+            print("Val Scores: {}".format(val_scores))
+            print("Best iterations: {}".format(best_iterations))
                 
             if exp is not None:
                 exp.log_metric("mean_val_score", np.mean(val_scores), step=trial.number)
@@ -474,8 +520,51 @@ def main():
                 exp.log_text(xgb_params, step=trial.number)
                 exp.log_text(num_boost_round, step=trial.number)
                 
-            print("Train Scores: {}".format(train_scores))
-            print("Val Scores: {}".format(val_scores))
+            
+            # Now train final model on full dataset; output preds
+            pipe.fit(X, y)
+            _X_train = pipe.transform(X)
+            y_train = y
+            _X_test  = pipe.transform(X_test)
+
+            dtrain = xgb.DMatrix(_X_train, label=y_train)
+            dtest  = xgb.DMatrix(_X_test)
+
+            start = time.time()
+            print("xbg train, one last time..")
+            num_boost_round_final = num_boost_round
+            if len(best_iterations) > 1:
+                num_boost_round_final = np.rint(np.mean(best_iterations)).astype(int)
+            num_boost_round_final = num_boost_round_final+300
+            print("num_boost_round_final: {}".format(num_boost_round_final))
+            _model = xgb.train(params=xgb_params, 
+                               dtrain=dtrain, 
+                               num_boost_round=num_boost_round_final, 
+                               xgb_model=None,
+                               #evals=[(dtrain, "train"), (dval, "val")],
+                               #early_stopping_rounds=20,
+                               verbose_eval=50,
+                            )
+
+            print("xbg predict..")
+            probas = _model.predict(dtest,  iteration_range=(0,_model.best_iteration))
+            preds = np.argmax(probas, axis=1)
+            preds = label_transformer.inverse_transform(preds)
+
+            print("outputting files..")
+            preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
+            preds_fn = os.path.join(out_dir, "{}-{}-{}-preds.csv".format(runname, data_id, trial.number))
+            preds_df.to_csv(preds_fn, index=False)
+            print("tune_eq: Wrote preds file: {}".format(preds_fn))
+
+            probas_df = pd.DataFrame(probas, columns=["1", "2", "3"])
+            probas_df[id_col] = test_df[id_col]
+            probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
+            probas_fn = os.path.join(out_dir, "{}-{}-{}-probas.csv".format(runname, data_id, trial.number))
+            probas_df.to_csv(probas_fn, index=False)
+            print("tune_eq: Wrote probas file: {}".format(probas_fn))
+            
+            
             return np.mean(val_scores)
        
         sampler = None
@@ -492,14 +581,14 @@ def main():
         
         if args.algo_set == 1:
             study.optimize(lambda trial: lgbm_objective(trial, X, y, 
-                                                   booster=args.booster, 
+                                                   booster="gbdt",
                                                    scale_pos_weight=args.scale_pos_weight,), 
                            n_trials=args.n_trials, 
                            gc_after_trial=True)
         elif args.algo_set == 2:
             study.optimize(lambda trial: xgb_objective(trial, X, y, 
-                                                   booster=args.booster, 
-                                                   grow_policy=args.grow_policy, 
+                                                   booster="gbtree",
+                                                   grow_policy="lossguide",
                                                    scale_pos_weight=args.scale_pos_weight,), 
                            n_trials=args.n_trials, 
                            gc_after_trial=True)

@@ -66,6 +66,8 @@ def main():
     parser.add_argument('--booster', type=str, default='gbtree')
     parser.add_argument('--grow-policy', type=str, default='lossguide')
     
+    parser.add_argument('--cv', type=int, default=1)
+    
     args = parser.parse_args()
 
     print("Command line arguments:")
@@ -143,6 +145,7 @@ def main():
         
     enc =  ce.wrapper.PolynomialWrapper(
             ce.target_encoder.TargetEncoder(handle_unknown="value", handle_missing="value", min_samples_leaf=1, smoothing=0.1, return_df=True))
+    enc =   ce.wrapper.PolynomialWrapper(ce.m_estimate.MEstimateEncoder(randomized=False, verbose=0))
 
     steps.append(("cat_enc2", enc))
 
@@ -204,8 +207,68 @@ def main():
             'reg_lambda': 0.0905671609396819, 
             'gamma': 0.003548273713177225,
         }
-
-   
+    elif args.golden_params_id == 4:
+        # LGBM
+        num_boost_round = 2734
+        lgbm_params = {
+            'num_leaves': 857, 
+            'min_data_in_leaf': 12, 
+            'min_child_weight': 0.5193471352882064, 
+            'learning_rate': 0.0017066346643132525, 
+            'subsample': 0.7029653970684423, 
+            'colsample_by_level': 0.9267248723407298, 
+            'colsample_by_tree': 0.34544625696721853, 
+            'reg_alpha': 0.3635884608187082, 
+            'reg_lambda': 0.474499505524743, 
+            'extra_tree': False
+        }
+    elif args.golden_params_id == 5:
+        # XG; CV 12 = .7531
+        #num_boost_round = int(np.rint(1250*1.2))
+        num_boost_round = 1700
+        xgb_params = {
+            'max_leaves': 2568, 
+            'min_child_weight': 0.0011997500956328361, 
+            'learning_rate': 0.007182487641161421, 
+            'subsample': 0.28260194201537114, 
+            'colsample_by_level': 0.9928575741146745, 
+            'colsample_by_tree': 0.23302331619804006, 
+            'reg_alpha': 0.040718744692607736, 
+            'reg_lambda': 0.019840800340459982, 
+            'gamma': 0.22021170508358784
+        }
+        
+    elif args.golden_params_id == 6:
+        # XG; CV 12 = .7534
+        num_boost_round = 1000
+        xgb_params = {
+            'max_leaves': 1055, 
+            'min_child_weight': 0.013401036228509862, 
+            'learning_rate': 0.023526547650371932, 
+            'subsample': 0.9868759795977547, 
+            'colsample_by_level': 0.9050183564473492, 
+            'colsample_by_tree': 0.3422627835803444, 
+            'reg_alpha': 0.04236496140689456, 
+            'reg_lambda': 0.6104890578780432, 
+            'gamma': 0.5985487319949556
+        }
+        
+    elif args.golden_params_id == 7:
+        # XG; Steve manual
+        num_boost_round = 3000
+        xgb_params = {
+            'max_leaves': 1500,
+            'min_child_weight': 0.01,
+            'learning_rate': 0.02,
+            'subsample': 0.95,
+            'colsample_by_level': 0.9,
+            'colsample_by_tree': 0.34,
+            'reg_alpha': 0.05,
+            'reg_lambda': 0.5,
+            'gamma': 0.001,
+        }
+        
+           
     xgb_params.update({
           "booster": args.booster,
           "max_depth": 0,
@@ -219,6 +282,7 @@ def main():
     })
     
     print("xgb_params: {}".format(xgb_params))
+    print("num_boost_round: {}".format(num_boost_round))
 
     label_transformer = LabelEncoder()
     y = label_transformer.fit_transform(y)
@@ -235,10 +299,13 @@ def main():
     val_scores = []
     train_scores = []
     best_iterations = []
+    probas = list()
     cv_step = 0
-    if True:
+    if args.cv == 1:
         # Cross validation loop
-        skf = StratifiedKFold(n_splits=8, random_state=77, shuffle=True)
+        #skf = StratifiedKFold(n_splits=12, random_state=12, shuffle=True)
+        skf = StratifiedKFold(n_splits=12, random_state=None, shuffle=False)
+        skf = StratifiedKFold(n_splits=32, random_state=42, shuffle=True)
 
         for train_index, val_index in skf.split(X, y):
             cv_step = cv_step+1
@@ -250,9 +317,11 @@ def main():
 
             _X_train = pipe.transform(X_train)
             _X_val  = pipe.transform(X_val)
+            _X_test = pipe.transform(X_test)
             
             dtrain = xgb.DMatrix(_X_train, label=y_train)
             dval   = xgb.DMatrix(_X_val, label=y_val)
+            dtest  = xgb.DMatrix(_X_test)
             
             start = time.time()
             print("xbg train..")
@@ -261,38 +330,42 @@ def main():
                                evals=[(dtrain, "train"), (dval, "val")],
                                early_stopping_rounds=20,
                                evals_result=eval_r,
+                               verbose_eval=50,
                                xgb_model=None)
             train_time = (time.time() - start)
             print("..done. {} secs".format(train_time))
+            
+            y_test_pred_proba = _model.predict(dtest, iteration_range=(0, _model.best_iteration))
+            probas.append(y_test_pred_proba)
 
-            y_pred_proba = _model.predict(dval, iteration_range=(0, _model.best_iteration))
-            y_pred = np.argmax(y_pred_proba,axis=1)
+            y_val_pred_proba = _model.predict(dval, iteration_range=(0, _model.best_iteration))
+            y_val_pred = np.argmax(y_val_pred_proba,axis=1)
             print("Val:")
-            print(classification_report(y_val, y_pred, digits=4))
+            print(classification_report(y_val, y_val_pred, digits=4))
 
             custom_metrics = {
-                'val_log_loss':  log_loss(y_val, y_pred_proba),
-                'val_micro_f1':  f1_score(y_val, y_pred, average="micro"),
-                'val_macro_f1':  f1_score(y_val, y_pred, average="macro"),
-                'val_weighted_f1':  f1_score(y_val, y_pred, average="weighted"),
-                'val_roc_auc':  roc_auc_score(y_val, y_pred_proba, multi_class="ovo"),
+                'val_log_loss':  log_loss(y_val, y_val_pred_proba),
+                'val_micro_f1':  f1_score(y_val, y_val_pred, average="micro"),
+                'val_macro_f1':  f1_score(y_val, y_val_pred, average="macro"),
+                'val_weighted_f1':  f1_score(y_val, y_val_pred, average="weighted"),
+                'val_roc_auc':  roc_auc_score(y_val, y_val_pred_proba, multi_class="ovo"),
             }
             
             if exp is not None:
-                exp.log_confusion_matrix(y_val, y_pred, title="Val Confusion Matrix {}".format(cv_step))
+                exp.log_confusion_matrix(y_val, y_val_pred, title="Val Confusion Matrix {}".format(cv_step))
 
-            y_pred_proba = _model.predict(dtrain, iteration_range=(0, _model.best_iteration))
-            y_pred = np.argmax(y_pred_proba,axis=1)
+            y_train_pred_proba = _model.predict(dtrain, iteration_range=(0, _model.best_iteration))
+            y_train_pred = np.argmax(y_train_pred_proba,axis=1)
 
             custom_metrics.update({
-                'train_log_loss':  log_loss(y_train, y_pred_proba),
-                'train_micro_f1':  f1_score(y_train, y_pred, average="micro"),
-                'train_macro_f1':  f1_score(y_train, y_pred, average="macro"),
-                'train_weighted_f1':  f1_score(y_train, y_pred, average="weighted"),
-                'train_roc_auc':  roc_auc_score(y_train, y_pred_proba, multi_class="ovo"),
+                'train_log_loss':  log_loss(y_train, y_train_pred_proba),
+                'train_micro_f1':  f1_score(y_train, y_train_pred, average="micro"),
+                'train_macro_f1':  f1_score(y_train, y_train_pred, average="macro"),
+                'train_weighted_f1':  f1_score(y_train, y_train_pred, average="weighted"),
+                'train_roc_auc':  roc_auc_score(y_train, y_train_pred_proba, multi_class="ovo"),
             })
             print("Train:")
-            print(classification_report(y_train, y_pred, digits=4))
+            print(classification_report(y_train, y_train_pred, digits=4))
 
             custom_metrics.update({
                 "train_seconds": train_time,
@@ -341,26 +414,58 @@ def main():
             exp.log_metric("mean_val_score", np.mean(val_scores))
             exp.log_metric("mean_train_score", np.mean(train_scores))
             exp.log_metric("mean_best_iteration", np.mean(best_iterations))
+            
+            
 
+    if len(probas) > 1:
+        probas_df = pd.DataFrame(np.mean(probas, axis=0), columns=["1", "2", "3"])
+        probas_df[id_col] = test_df[id_col]
+        probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
+        probas_fn = os.path.join(out_dir, "{}-{}-cv-probas.csv".format(runname, data_id))
+        probas_df.to_csv(probas_fn, index=False)
+        print("tune_eq: Wrote CV probas file: {}".format(probas_fn))
+            
+            
+    #X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.05, random_state=42)
+    
+    #pipe.fit(X_train, y_train)
+    #_X_train = pipe.transform(X_train)
+    #_X_val   = pipe.transform(X_val)
+    #_X_test  = pipe.transform(X_test)
+
+    #dtrain = xgb.DMatrix(_X_train, label=y_train)
+    #dval   = xgb.DMatrix(_X_val, label=y_val)
+    #dtest  = xgb.DMatrix(_X_test)
+    
     pipe.fit(X, y)
-    _X = pipe.transform(X)
-    _X_test = pipe.transform(X_test)
+    _X_train = pipe.transform(X)
+    y_train = y
+    _X_test  = pipe.transform(X_test)
 
-    dtrain = xgb.DMatrix(_X, label=y)
+    dtrain = xgb.DMatrix(_X_train, label=y_train)
     dtest  = xgb.DMatrix(_X_test)
 
     start = time.time()
     print("xbg train, one last time..")
-    num_boost_round_final = num_boost_round
     if len(best_iterations) > 1:
-        num_boost_round_final = np.rint(np.mean(best_iterations))
+        num_boost_round_final = np.rint(np.mean(best_iterations)).astype(int)
+    num_boost_round_final = num_boost_round + 500
     print("num_boost_round_final: {}".format(num_boost_round_final))
-    _model = xgb.train(params=xgb_params, dtrain=dtrain, num_boost_round=num_boost_round_final, xgb_model=None)
+    _model = xgb.train(params=xgb_params, 
+                       dtrain=dtrain, 
+                       num_boost_round=num_boost_round_final, 
+                       xgb_model=None,
+                       #evals=[(dtrain, "train"), (dval, "val")],
+                       #early_stopping_rounds=20,
+                       verbose_eval=10,
+                    )
     
-    probas = _model.predict(dtest, ntree_limit=num_boost_round_final)
+    print("xbg predict..")
+    probas = _model.predict(dtest,  iteration_range=(0,_model.best_iteration))
     preds = np.argmax(probas, axis=1)
     preds = label_transformer.inverse_transform(preds)
     
+    print("outputting files..")
     preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
     preds_fn = os.path.join(out_dir, "{}-{}-preds.csv".format(runname, data_id))
     preds_df.to_csv(preds_fn, index=False)
