@@ -31,7 +31,6 @@ from sklearn.model_selection import StratifiedKFold
 import optuna
 import time
 
-
 from functools import partial
 
 from SteveHelpers import dump_json, get_data_types
@@ -48,6 +47,127 @@ from SteveHelpers import SteveCategoryImputer
 from SteveHelpers import SteveCategoryCoalescer
 from SteveHelpers import check_dataframe
 
+def run_one_lgbm(X, y, pipe, args, num_boost_round, num_boost_round_final, params, exp=None, X_test=None):
+    """
+    pipe: preprocessing/FE pipeline to fit/use
+    args: command line args
+    num_boost_rounds: for CV
+    num_boost_rounds: for final fit
+    params: lgbm params
+    exp: comet experiment object
+    
+    Returns:
+    probas: predicted probabilies if train_full_model is true, else None
+    preds: predicted classes if train_full_model is true, else None
+    val_scores: estimated val score for each each CV fold
+    train_scores: estimated val score for each each CV fold
+    """
+    probas = None
+    preds = None
+    val_scores = []
+    train_scores = []
+    best_iterations = []
+    
+    print("run_one_lgbm: args: {}".format(args))
+    print("run_one_lgbm: params: {}".format(params))
+    print("run_one_lgbm: num_boost_round (for cv): {}".format(num_boost_round))
+    print("run_one_lgbm: num_boost_round_final: {}".format(num_boost_round_final))
+          
+    label_transformer = LabelEncoder()
+    y = label_transformer.fit_transform(y)
+
+    # Cross validation loop?
+    if args.num_cv > 1:
+        skf = StratifiedKFold(n_splits=args.num_cv, random_state=42, shuffle=True)
+
+        cv_step = -1
+        for train_index, val_index in skf.split(X, y):
+            cv_step = cv_step + 1
+            print("run_one_lgbm: cv_step {} of {}".format(cv_step, args.num_cv))
+          
+            X_train, X_val = X.loc[train_index], X.loc[val_index]
+            y_train, y_val = y[train_index], y[val_index]
+            
+            pipe.fit(X_train, y_train)
+
+            _X_train = pipe.transform(X_train)
+            _X_val  = pipe.transform(X_val)
+          
+            check_dataframe(_X_train, "_X_train")
+            check_dataframe(_X_val, "_X_val")
+            
+            dtrain = lgbm.Dataset(_X_train, label=y_train)
+            dval   = lgbm.Dataset(_X_val, label=y_val)
+
+            start = time.time()
+            print("run_one_lgbm: cv lgbm train..")
+            eval_r = {}
+            _model = lgbm.train(params=params, 
+                               train_set=dtrain, 
+                               num_boost_round=num_boost_round,
+                               valid_sets=[dval, dtrain],
+                               valid_names=["val", "train"],
+                               early_stopping_rounds=20,
+                               evals_result=eval_r,
+                               verbose_eval=50)
+            train_time = (time.time() - start)
+            print("..done lgbm training in {} secs".format(train_time))
+
+            print("run_one_lgbm: calculating val metrics..")
+            y_val_pred_proba = _model.predict(_X_val)
+            y_val_pred = np.argmax(y_val_pred_proba,axis=1)
+            val_micro_f1 = f1_score(y_val, y_val_pred, average="micro"),
+            print(classification_report(y_val, y_val_pred, digits=4))
+
+            print("run_one_lgbm: calculating train metrics..")
+            y_train_pred_proba = _model.predict(_X_train)
+            y_train_pred = np.argmax(y_train_pred_proba,axis=1)
+            train_micro_f1 = f1_score(y_train, y_train_pred, average="micro"),
+            print(classification_report(y_train, y_train_pred, digits=4))
+
+            val_scores.append(val_micro_f1)
+            train_scores.append(train_micro_f1)
+            best_iterations.append(_model.best_iteration)
+          
+
+        def mean_confidence_interval(data, confidence=0.95):
+            a = 1.0 * np.array(data)
+            n = len(a)
+            m, se = np.mean(a), scipy.stats.sem(a)
+            h = se * scipy.stats.t.ppf((1 + confidence) / 2., n-1)
+            return m, m-h, m+h
+              
+        print("run_one_lgbm: cv complete.")
+        print("run_one_lgbm: Train Scores: {}".format(train_scores))
+        print("run_one_lgbm: Val Scores: {}".format(val_scores))
+        print("run_one_lgbm: Val Score range: {}".format(mean_confidence_interval(val_scores)))
+        print("run_one_lgbm: Best iterations: {}".format(best_iterations))
+        print("run_one_lgbm: Best iteration range: {}".format(mean_confidence_interval(best_iterations)))
+
+   
+    if args.train_full_model == 1: 
+        print("run_one_lgbm: Training full model.")
+        pipe.fit(X, y)
+        _X = pipe.transform(X)
+        _X_test  = pipe.transform(X_test)
+
+        dtrain = lgbm.Dataset(_X_train, label=y_train)
+
+        if num_boost_round_final is None:
+            if args.num_cv < 1:
+                print("Error: num_boost_round_final is None, but CV was not run.")
+            num_boost_round_final = np.rint(np.mean(best_iterations)*1.1).astype(int)
+          
+        print("run_one_lgbm: num_boost_round_final: {}".format(num_boost_round_final))
+        _model = lgbm.train(params=params,  train_set=dtrain, 
+                           num_boost_round=num_boost_round_final, verbose_eval=50)
+
+        print("lgbm predict..")
+        probas = _model.predict(_X_test)
+        preds = np.argmax(probas, axis=1)
+        preds = label_transformer.inverse_transform(preds)
+          
+    return probas, preds, val_scores, train_scores
 
 def run_one_xgboost(X, y, pipe, args, num_boost_round, num_boost_round_final, params, exp=None, X_test=None):
     """
@@ -152,7 +272,7 @@ def run_one_xgboost(X, y, pipe, args, num_boost_round, num_boost_round_final, pa
         _X = pipe.transform(X)
         _X_test  = pipe.transform(X_test)
 
-        dtrain = xgb.DMatrix(_X_train, label=y_train)
+        dtrain = xgb.DMatrix(_X, label=y)
         dtest  = xgb.DMatrix(_X_test)
 
         if num_boost_round_final is None:
@@ -164,15 +284,12 @@ def run_one_xgboost(X, y, pipe, args, num_boost_round, num_boost_round_final, pa
         _model = xgb.train(params=params, 
                            dtrain=dtrain, 
                            num_boost_round=num_boost_round_final, 
-                           xgb_model=None,
-                           verbose_eval=50,
-                        )
+                           xgb_model=None)
 
         print("xbg predict..")
         probas = _model.predict(dtest)
         preds = np.argmax(probas, axis=1)
         preds = label_transformer.inverse_transform(preds)
-
           
     return probas, preds, val_scores, train_scores
 
@@ -313,12 +430,41 @@ def main():
         preds = None
         val_scores = None
         train_scores = None
+        
+        
+        if args.algo_set == 1:
+            num_boost_round = 3500
+            num_boost_round_final = 110
+            lgbm_params = {
+                "num_leaves": 2671,
+                "min_child_weight": 0.7834887246590326,
+                "min_data_in_leaf": 2,
+                "learning_rate": 0.04670098249884267,
+                "colsample_bylevel": 0.69404134745479,
+                "colsample_bytree": 0.30337702784418485,
+                "reg_alpha": 0.007004338652814285,
+                "reg_lambda": 4.885400880425611,
+                'extra_tree': False
+            } 
+                
+            lgbm_params.update({
+                  "bagging_freq": 0,
+                  "bagging_fraction": 1.0,
+                  "boosting": 'gbdt',
+                  "max_depth": -1,
+                  "n_jobs": 5,
+                  "objective": "multiclass",
+                  "verbosity": -1,
+                  "num_class": 3,
+                  "seed": 77,
+                  "seed_per_iteration": True,
+            })
+            probas, preds, val_scores, train_scores = run_one_lgbm(
+                X, y, pipe, args, num_boost_round, num_boost_round_final, lgbm_params, exp, X_test)
          
         if args.algo_set == 2:
-            #num_boost_round = 3500
-            #num_boost_round_final = 2100
-            num_boost_round = 350
-            num_boost_round_final = 210
+            num_boost_round = 3500
+            num_boost_round_final = 110
             xgb_params = {
                 'max_leaves': 3949, 
                 'min_child_weight': 1.1992742594922994, 
@@ -368,166 +514,55 @@ def main():
           
     if args.run_type == "optuna":
         
-        def lgbm_objective(trial, X, y, booster="gbtree", scale_pos_weight=1):
+        def lgbm_objective(trial, X, y, pipe, exp):
            
             upper = 4096
-            num_boost_round = 3500 # trial.suggest_int("num_boost_round", 4, upper, log=True)
+            num_boost_round = 3500 
             num_leaves = trial.suggest_int("num_leaves", 4, upper, log=True)
             min_data_in_leaf = trial.suggest_int("min_data_in_leaf", 2, 2**7, log=True)
             min_child_weight = trial.suggest_loguniform("min_child_weight", 0.001, 128)
             learning_rate = trial.suggest_loguniform("learning_rate", 1/1024, 1.0)
             subsample = trial.suggest_float("subsample", 0.1, 1.0)
-            colsample_bylevel = trial.suggest_float("colsample_by_level", 0.01, 1.0)
-            colsample_bytree = trial.suggest_float("colsample_by_tree", 0.01, 1.0)
+            feature_fraction_bynode = trial.suggest_float("feature_fraction_bynode", 0.01, 1.0)
+            feature_fraction = trial.suggest_float("feature_fraction", 0.01, 1.0)
             reg_alpha = trial.suggest_loguniform("reg_alpha", 1/1024, 1024)
             reg_lambda = trial.suggest_loguniform("reg_lambda", 1/1024, 1024)
-            #gamma = trial.suggest_loguniform("gamma", 1/1024, 128)
-            extra_tree = trial.suggest_categorical("extra_tree", [True, False])
+            extra_trees = trial.suggest_categorical("extra_trees", [True, False])
             
-            bagging_freq = 0
-            bagging_fraction = 1.0
-            #if booster=="rf":
-                #bagging_freq = 5
-                
-            params = {
+            lgbm_params = {
                   "num_leaves": num_leaves,
                   "min_child_weight": min_child_weight,
                   "min_data_in_leaf": min_data_in_leaf,
                   "learning_rate": learning_rate,
-                  "colsample_bynode": colsample_bylevel,
-                  "colsample_bytree": colsample_bytree,
+                  "feature_fraction_bynode": feature_fraction_bynode,
+                  "feature_fraction": feature_fraction,
                   "reg_alpha": reg_alpha,
                   "reg_lambda": reg_lambda,
-                  "bagging_freq": bagging_freq,
-                  "bagging_fraction": bagging_fraction,
-                  "extra_trees": extra_tree,
-                  "boosting": booster,
+                  "extra_trees": extra_trees,
+                
+                  "bagging_freq": 0,
+                  "bagging_fraction": 1.0,
+                  "boosting": 'gbdt',
                   "max_depth": -1,
                   "n_jobs": 5,
                   "objective": "multiclass",
                   "verbosity": -1,
                   "num_class": 3,
                   "seed": 77,
+                  "seed_per_iteration": True,
             }
 
-            label_transformer = LabelEncoder()
-            y = label_transformer.fit_transform(y)
-           
-            # Cross validation loop
-            skf = StratifiedKFold(n_splits=args.num_cv, random_state=42, shuffle=True)
-
-            val_scores = []
-            train_scores = []
-            best_iterations = []
-            for train_index, val_index in skf.split(X, y):
-                X_train, X_val = X.loc[train_index], X.loc[val_index]
-                y_train, y_val = y[train_index], y[val_index]
-
-                pipe.fit(X_train, y_train)
-
-                _X_train = pipe.transform(X_train)
-                _X_val  = pipe.transform(X_val)
-
-                dtrain = lgbm.Dataset(_X_train, label=y_train)
-                dval   = lgbm.Dataset(_X_val, label=y_val)
-
-                start = time.time()
-                print("lgbm train..")
-                eval_r = {}
-                _model = lgbm.train(params=params, train_set=dtrain, num_boost_round=num_boost_round, 
-                                   valid_sets=[dval, dtrain],
-                                   valid_names=["val", "train"],
-                                   early_stopping_rounds=20,
-                                   evals_result=eval_r,
-                                   verbose_eval=50,
-                                   init_model=None)
-                train_time = (time.time() - start)
-                print("..done. {} secs".format(train_time))
-
-
-                y_pred_proba = _model.predict(_X_val)
-                y_pred = np.argmax(y_pred_proba,axis=1)
-                print(classification_report(y_val, y_pred, digits=4))
-
-                custom_metrics = {
-                    'val_log_loss':  log_loss(y_val, y_pred_proba),
-                    'val_micro_f1':  f1_score(y_val, y_pred, average="micro"),
-                }
-
-                y_pred_proba = _model.predict(_X_train)
-                y_pred = np.argmax(y_pred_proba,axis=1)
-
-                custom_metrics.update({
-                    'train_log_loss':  log_loss(y_train, y_pred_proba),
-                    'train_micro_f1':  f1_score(y_train, y_pred, average="micro"),
-                })
-                print(classification_report(y_train, y_pred, digits=4))
-
-                custom_metrics.update({
-                    "train_seconds": train_time,
-                    "step": trial.number,
-                })
-
-                print("Fold metrics:")
-                print(custom_metrics)
-
-                val_scores.append(custom_metrics['val_micro_f1'])
-                train_scores.append(custom_metrics['train_micro_f1'])
-                best_iterations.append(_model.best_iteration)
-                
-            print("Train Scores: {}".format(train_scores))
-            print("Val Scores: {}".format(val_scores))
-            print("Best iterations: {}".format(best_iterations))
-                
+            _, _, val_scores, train_scores = run_one_lgbm(
+                X, y, pipe, args, num_boost_round, num_boost_round_final=None, params=lgbm_params, exp=exp, X_test=None)
+          
             if exp is not None:
                 exp.log_metric("mean_val_score", np.mean(val_scores), step=trial.number)
                 exp.log_metric("mean_train_score", np.mean(train_scores), step=trial.number)
-                exp.log_text(params, step=trial.number)
-                exp.log_text(num_boost_round, step=trial.number)
-                
-            # Now train final model on full dataset; output preds
-            pipe.fit(X, y)
-            _X_train = pipe.transform(X)
-            y_train = y
-            _X_test  = pipe.transform(X_test)
-
-            dtrain = lgbm.Dataset(_X_train, label=y_train)
-            start = time.time()
-            print("lgbm train..")
-            eval_r = {}
-            num_boost_round_final = num_boost_round
-            if len(best_iterations) > 1:
-                num_boost_round_final = np.rint(np.mean(best_iterations)).astype(int)
-            num_boost_round_final = num_boost_round_final+300
-            print("num_boost_round_final: {}".format(num_boost_round_final))
-            _model = lgbm.train(params=params, train_set=dtrain, num_boost_round=num_boost_round_final,
-                               verbose_eval=50,
-                               init_model=None)
-            train_time = (time.time() - start)
-            print("..done. {} secs".format(train_time))
-
-            print("lgbm predict..")
-            probas = _model.predict(_X_test)
-            preds = np.argmax(probas, axis=1)
-            preds = label_transformer.inverse_transform(preds)
-
-            print("outputting files..")
-            preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
-            preds_fn = os.path.join(out_dir, "{}-{}-{}-preds.csv".format(runname, data_id, trial.number))
-            preds_df.to_csv(preds_fn, index=False)
-            print("tune_eq: Wrote preds file: {}".format(preds_fn))
-
-            probas_df = pd.DataFrame(probas, columns=["1", "2", "3"])
-            probas_df[id_col] = test_df[id_col]
-            probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
-            probas_fn = os.path.join(out_dir, "{}-{}-{}-probas.csv".format(runname, data_id, trial.number))
-            probas_df.to_csv(probas_fn, index=False)
-            print("tune_eq: Wrote probas file: {}".format(probas_fn))
+                exp.log_text(lgbm_params, step=trial.number)
             
             return np.mean(val_scores)
        
         def xgb_objective(trial, X, y, pipe, exp):
-           
             upper = 4096
             num_boost_round = 2500 # trial.suggest_int("num_boost_round", 4, upper, log=True)
             max_leaves = trial.suggest_int("max_leaves", 4, upper, log=True)
@@ -539,7 +574,6 @@ def main():
             reg_alpha = trial.suggest_loguniform("reg_alpha", 1/1024, 1024)
             reg_lambda = trial.suggest_loguniform("reg_lambda", 1/1024, 1024)
             gamma = trial.suggest_loguniform("gamma", 1/1024, 128)
-           
             
             xgb_params = {
                   "max_leaves": max_leaves,
@@ -565,7 +599,7 @@ def main():
             }
           
             _, _, val_scores, train_scores = run_one_xgboost(
-                X, y, pipe, num_boost_round, num_boost_round_final=None, params=xgb_params, exp=exp)
+                X, y, pipe, args, num_boost_round, num_boost_round_final=None, params=xgb_params, exp=exp, X_test=None)
           
             if exp is not None:
                 exp.log_metric("mean_val_score", np.mean(val_scores), step=trial.number)
@@ -581,19 +615,15 @@ def main():
             sampler = optuna.samplers.MOTPESampler()
         elif args.sampler == "random":
             sampler = optuna.samplers.RandomSampler()
-        else:
-            pass
         
         study = optuna.create_study(study_name=runname, sampler=sampler, direction="maximize")
         
         if args.algo_set == 1:
-            study.optimize(lambda trial: lgbm_objective(trial, X, y, 
-                                                   booster="gbdt",
-                                                   scale_pos_weight=args.scale_pos_weight,), 
+            study.optimize(lambda trial: lgbm_objective(trial, X, y, pipe, exp),
                            n_trials=args.n_trials, 
                            gc_after_trial=True)
         elif args.algo_set == 2:
-            study.optimize(lambda trial: xgb_objective(trial, X, y, exp), 
+            study.optimize(lambda trial: xgb_objective(trial, X, y, pipe, exp), 
                            n_trials=args.n_trials, 
                            gc_after_trial=True)
         
@@ -608,11 +638,5 @@ def main():
             
         return
     
-    else:
-        pass
-
-    endtime = datetime.datetime.now()
-    duration = (endtime - starttime).seconds
-
 if __name__ == "__main__":
     main()
