@@ -10,6 +10,7 @@ import pandas as pd
 import os
 import sys
 
+import scipy.stats
 import json
 import socket
 import datetime
@@ -45,6 +46,135 @@ from SteveHelpers import SteveMissingIndicator
 from SteveHelpers import SteveNumericImputer
 from SteveHelpers import SteveCategoryImputer
 from SteveHelpers import SteveCategoryCoalescer
+from SteveHelpers import check_dataframe
+
+
+def run_one_xgboost(X, y, pipe, args, num_boost_round, num_boost_round_final, params, exp=None, X_test=None):
+    """
+    pipe: preprocessing/FE pipeline to fit/use
+    args: command line args
+    num_boost_rounds: for CV
+    num_boost_rounds: for final fit
+    params: xgb params
+    exp: comet experiment object
+    
+    Returns:
+    probas: predicted probabilies if train_full_model is true, else None
+    preds: predicted classes if train_full_model is true, else None
+    val_scores: estimated val score for each each CV fold
+    train_scores: estimated val score for each each CV fold
+    """
+    probas = None
+    preds = None
+    val_scores = []
+    train_scores = []
+    best_iterations = []
+    
+    print("run_one_xgboost: args: {}".format(args))
+    print("run_one_xgboost: params: {}".format(params))
+    print("run_one_xgboost: num_boost_round (for cv): {}".format(num_boost_round))
+    print("run_one_xgboost: num_boost_round_final: {}".format(num_boost_round_final))
+          
+    label_transformer = LabelEncoder()
+    y = label_transformer.fit_transform(y)
+
+    # Cross validation loop?
+    if args.num_cv > 1:
+        skf = StratifiedKFold(n_splits=args.num_cv, random_state=42, shuffle=True)
+
+        cv_step = -1
+        for train_index, val_index in skf.split(X, y):
+            cv_step = cv_step + 1
+            print("run_one_xgboost: cv_step {} of {}".format(cv_step, args.num_cv))
+          
+            X_train, X_val = X.loc[train_index], X.loc[val_index]
+            y_train, y_val = y[train_index], y[val_index]
+            
+            pipe.fit(X_train, y_train)
+
+            _X_train = pipe.transform(X_train)
+            _X_val  = pipe.transform(X_val)
+          
+            check_dataframe(_X_train, "_X_train")
+            check_dataframe(_X_val, "_X_val")
+
+            dtrain = xgb.DMatrix(_X_train, label=y_train)
+            dval   = xgb.DMatrix(_X_val, label=y_val)
+
+            start = time.time()
+            print("run_one_xgboost: cv xgb train..")
+            eval_r = {}
+            _model = xgb.train(params=params, 
+                               dtrain=dtrain, 
+                               num_boost_round=num_boost_round,
+                               evals=[(dtrain, "train"), (dval, "val")],
+                               early_stopping_rounds=20,
+                               evals_result=eval_r,
+                               verbose_eval=50)
+            train_time = (time.time() - start)
+            print("..done xgb training in {} secs".format(train_time))
+
+            print("run_one_xgboost: calculating val metrics..")
+            y_val_pred_proba = _model.predict(dval, iteration_range=(0, _model.best_iteration))
+            y_val_pred = np.argmax(y_val_pred_proba,axis=1)
+            val_micro_f1 = f1_score(y_val, y_val_pred, average="micro"),
+            print(classification_report(y_val, y_val_pred, digits=4))
+
+            print("run_one_xgboost: calculating train metrics..")
+            y_train_pred_proba = _model.predict(dtrain, iteration_range=(0, _model.best_iteration))
+            y_train_pred = np.argmax(y_train_pred_proba,axis=1)
+            train_micro_f1 = f1_score(y_train, y_train_pred, average="micro"),
+            print(classification_report(y_train, y_train_pred, digits=4))
+
+            val_scores.append(val_micro_f1)
+            train_scores.append(train_micro_f1)
+            best_iterations.append(_model.best_iteration)
+          
+
+        def mean_confidence_interval(data, confidence=0.95):
+            a = 1.0 * np.array(data)
+            n = len(a)
+            m, se = np.mean(a), scipy.stats.sem(a)
+            h = se * scipy.stats.t.ppf((1 + confidence) / 2., n-1)
+            return m, m-h, m+h
+              
+        print("run_one_xgboost: cv complete.")
+        print("run_one_xgboost: Train Scores: {}".format(train_scores))
+        print("run_one_xgboost: Val Scores: {}".format(val_scores))
+        print("run_one_xgboost: Val Score range: {}".format(mean_confidence_interval(val_scores)))
+        print("run_one_xgboost: Best iterations: {}".format(best_iterations))
+        print("run_one_xgboost: Best iteration range: {}".format(mean_confidence_interval(best_iterations)))
+
+   
+    if args.train_full_model == 1: 
+        print("run_one_xgboost: Training full model.")
+        pipe.fit(X, y)
+        _X = pipe.transform(X)
+        _X_test  = pipe.transform(X_test)
+
+        dtrain = xgb.DMatrix(_X_train, label=y_train)
+        dtest  = xgb.DMatrix(_X_test)
+
+        if num_boost_round_final is None:
+            if args.num_cv < 1:
+                print("Error: num_boost_round_final is None, but CV was not run.")
+            num_boost_round_final = np.rint(np.mean(best_iterations)*1.1).astype(int)
+          
+        print("run_one_xgboost: num_boost_round_final: {}".format(num_boost_round_final))
+        _model = xgb.train(params=params, 
+                           dtrain=dtrain, 
+                           num_boost_round=num_boost_round_final, 
+                           xgb_model=None,
+                           verbose_eval=50,
+                        )
+
+        print("xbg predict..")
+        probas = _model.predict(dtest)
+        preds = np.argmax(probas, axis=1)
+        preds = label_transformer.inverse_transform(preds)
+
+          
+    return probas, preds, val_scores, train_scores
 
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -53,25 +183,22 @@ def main():
     parser.add_argument('--enable-comet', type=int, default=1)
     # Prep/FE params
     parser.add_argument('--geo-id-set', type=int, default=3)
-    #parser.add_argument('--min-sample-leaf', type=int, default=5)
-    #parser.add_argument('--smoothing', type=float, default=10.0)
     parser.add_argument('--autofeat', type=int, default=0)
     parser.add_argument('--normalize', type=int, default=0)
     parser.add_argument('--sample-frac', type=float, default=1.0)
-    #parser.add_argument('--ensemble', type=int, default=0)
-    parser.add_argument('--cat-encoder', type=int, default=1)
+    parser.add_argument('--cat-encoder', type=int, default=2)
     
     # Search Params
     parser.add_argument('--run-type', type=str, default="optuna")
-    #parser.add_argument('--time-budget', type=int, default=60)
-    parser.add_argument('--metric', type=str, default="micro_f1")
     
     # XGBoost/LGBM params
     parser.add_argument('--algo-set', type=int, default=1)
     parser.add_argument('--booster', type=str, default='gbtree')
     parser.add_argument('--grow-policy', type=str, default='lossguide')
     parser.add_argument('--scale-pos-weight', type=float, default=1.0)
-    parser.add_argument('--num-cv', type=int, default=12)
+    parser.add_argument('--num-cv', type=int, default=0)
+    parser.add_argument('--train-full-model', type=int, default=0)
+          
     
     # Optuna params
     parser.add_argument('--sampler', type=str, default='tpe')
@@ -91,7 +218,7 @@ def main():
     exp=None
     if args.enable_comet == 1:
         exp = Experiment(
-            project_name="eq_searcher",
+            project_name="eq_{}".format(args.run_type),
             workspace="stepthom",
             parse_args=False,
             auto_param_logging=False,
@@ -105,31 +232,18 @@ def main():
     test_df  = pd.read_csv(test_fn)
     if args.sample_frac < 1.0:
         train_df  = train_df.sample(frac=args.sample_frac, random_state=3).reset_index(drop=True)
-
+        
+    X = train_df.drop([id_col, target_col], axis=1)
+    y = train_df[target_col]
+    X_test = test_df.drop([id_col], axis=1)
 
     geo_id_set = []
     if args.geo_id_set == 1:
         geo_id_set = ['geo_level_1_id']
     elif args.geo_id_set == 2:
         geo_id_set = ['geo_level_1_id', 'geo_level_2_id']
-    else:
+    elif args.geo_id_set == 3:
         geo_id_set = ['geo_level_1_id', 'geo_level_2_id', 'geo_level_3_id']
-
-    estimator_list = ['lgbm']
-    if args.algo_set == 1:
-        estimator_list = ['lgbm']
-    elif args.algo_set == 2:
-        estimator_list = ['xgboost']
-    elif args.algo_set == 3:
-        estimator_list = ['catboost']
-    elif args.algo_set == 4:
-        estimator_list = ['rf']
-    elif args.algo_set == 5:
-        estimator_list = ['extra_tree']
-
-    X = train_df.drop([id_col, target_col], axis=1)
-    y = train_df[target_col]
-    X_test = test_df.drop([id_col], axis=1)
 
     prep1 = Pipeline([
         ('typer', SteveFeatureTyper(cols=geo_id_set, typestr='category'))
@@ -165,11 +279,16 @@ def main():
         steps.append(('num_normalizer', SteveNumericNormalizer(float_cols, drop_orig=True)))
         
     enc =  ce.wrapper.PolynomialWrapper(
-            ce.target_encoder.TargetEncoder(handle_unknown="value", handle_missing="value", min_samples_leaf=1, smoothing=0.1, return_df=True))
+            ce.target_encoder.TargetEncoder(
+                handle_unknown="value", 
+                handle_missing="value", 
+                min_samples_leaf=1, 
+                smoothing=0.1, return_df=True))
 
     steps.append(("cat_enc2", enc))
 
-    print(steps)
+    for step in steps:
+        print(step)
     pipe = Pipeline(steps)
 
     runname = ""
@@ -189,56 +308,65 @@ def main():
         exp.log_parameters(vars(args))
         exp.log_asset('SteveHelpers.py')
 
-    feat_imp = None
-    if args.run_type == "flaml":
-        from flaml import AutoML
-        os.environ['OS_STEVE_MIN_SAMPLE_LEAF'] = str(args.min_sample_leaf)
-        os.environ['OS_STEVE_SMOOTHING'] = str(args.smoothing)
-        os.environ['OS_STEVE_BOOSTING'] = str(args.booster)
-       
-        automl_settings = {
-            "time_budget": args.time_budget,
-            "task": 'classification',
-            "n_jobs": 5,
-            "estimator_list": estimator_list,
-            "eval_method": "cv",
-            "n_splits": 3,
-            "metric": args.metric,
-            "ensemble": False,
-        }
-        automl_config = {
-            "comet_exp": exp,
-            "verbose": 1,
-            "log_training_metric": True,
-            "model_history": False,
-            "log_file_name": "logs/flaml-{}.log".format(runname),
-        }
+    if args.run_type == "one":
+        probas = None
+        preds = None
+        val_scores = None
+        train_scores = None
+         
+        if args.algo_set == 2:
+            #num_boost_round = 3500
+            #num_boost_round_final = 2100
+            num_boost_round = 350
+            num_boost_round_final = 210
+            xgb_params = {
+                'max_leaves': 3949, 
+                'min_child_weight': 1.1992742594922994, 
+                'learning_rate': 0.003150897907094229, 
+                'subsample': 0.47912852600183836, 
+                'colsample_bylevel': 0.6961990874302973, 
+                'colsample_bytree': 0.30862028608859277, 
+                'reg_alpha': 1.8627000386165924, 
+                'reg_lambda': 0.0186322334353944, 
+                'gamma': 0.06465888061358417,
+            }
 
-        print("automl_settings:")
-        print(automl_settings)
-        print("automl_config:")
-        print(automl_config)
+            xgb_params.update({
+                  "booster": 'gbtree',
+                  "max_depth": 0,
+                  "grow_policy": "lossguide",
+                  "tree_method": "hist",
+                  "n_jobs": 1,
+                  "objective": "multi:softprob",
+                  "eval_metric": "mlogloss",
+                  "verbosity": 1,
+                  "num_class": 3, 
+                  "seed": 77,
+                  "random_state": 77,
+                  "seed_per_iteration": True,
+            })
 
-        # Log some things before fit(), to more-easily monitor runs
-        if exp is not None:
-            exp.log_parameters(automl_settings)
-            exp.log_parameter("metric_name", args.metric)
+            probas, preds, val_scores, train_scores = run_one_xgboost(
+                X, y, pipe, args, num_boost_round, num_boost_round_final, xgb_params, exp, X_test)
+        
+        print("val_scores: {}".format(val_scores))
+        print("train_scores: {}".format(train_scores))
+         
+        if preds is not None:
+            preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
+            preds_fn = os.path.join(out_dir, "{}-{}-preds.csv".format(runname, data_id))
+            preds_df.to_csv(preds_fn, index=False)
+            print("tune_eq: Wrote preds file: {}".format(preds_fn))
 
-        clf = AutoML()
-        clf.fit(X, y, **automl_config, **automl_settings)
-        best_loss = clf.best_loss
-
-        print("Best config")
-        bm = clf.best_model_for_estimator(clf.best_config)
-        print("Best model")
-        bm = clf.best_model_for_estimator(clf.best_estimator)
-        print(bm.model)
-        feature_names = bm.feature_names_
-        feat_imp =  pd.DataFrame({'Feature': feature_names, 'Importance': bm.model.feature_importances_}).sort_values('Importance', ascending=False)
-        print("Feature importances")
-        print(feat_imp.head())
-
-    elif args.run_type == "optuna":
+        if probas is not None:
+            probas_df = pd.DataFrame(probas, columns=["1", "2", "3"])
+            probas_df[id_col] = test_df[id_col]
+            probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
+            probas_fn = os.path.join(out_dir, "{}-{}-probas.csv".format(runname, data_id))
+            probas_df.to_csv(probas_fn, index=False)
+            print("tune_eq: Wrote probas file: {}".format(probas_fn))
+          
+    if args.run_type == "optuna":
         
         def lgbm_objective(trial, X, y, booster="gbtree", scale_pos_weight=1):
            
@@ -398,7 +526,7 @@ def main():
             
             return np.mean(val_scores)
        
-        def xgb_objective(trial, X, y, booster="gbtree", grow_policy="lossguide", scale_pos_weight=1):
+        def xgb_objective(trial, X, y, pipe, exp):
            
             upper = 4096
             num_boost_round = 2500 # trial.suggest_int("num_boost_round", 4, upper, log=True)
@@ -406,16 +534,12 @@ def main():
             min_child_weight = trial.suggest_loguniform("min_child_weight", 0.001, 128)
             learning_rate = trial.suggest_loguniform("learning_rate", 1/1024, 1.0)
             subsample = trial.suggest_float("subsample", 0.1, 1.0)
-            colsample_bylevel = trial.suggest_float("colsample_by_level", 0.01, 1.0)
-            colsample_bytree = trial.suggest_float("colsample_by_tree", 0.01, 1.0)
+            colsample_bylevel = trial.suggest_float("colsample_bylevel", 0.01, 1.0)
+            colsample_bytree = trial.suggest_float("colsample_bytree", 0.01, 1.0)
             reg_alpha = trial.suggest_loguniform("reg_alpha", 1/1024, 1024)
             reg_lambda = trial.suggest_loguniform("reg_lambda", 1/1024, 1024)
             gamma = trial.suggest_loguniform("gamma", 1/1024, 128)
-            #booster = trial.suggest_categorical("booster", ["gbtree", "dart"])
            
-            max_depth = 0
-            if grow_policy == "depthwise":
-                max_depth = trial.suggest_int("max_depth", 4, 32)
             
             xgb_params = {
                   "max_leaves": max_leaves,
@@ -427,143 +551,26 @@ def main():
                   "reg_alpha": reg_alpha,
                   "reg_lambda": reg_lambda,
                   "gamma": gamma,
-                  "booster": booster,
-                  "max_depth": max_depth,
-                  "grow_policy": grow_policy,
-                  #"scale_pos_weight": scale_pos_weight,
+                
+                  "booster": "gbtree",
+                  "max_depth": 0,
+                  "grow_policy": "lossguide",
                   "tree_method": "hist",
                   "n_jobs": 5,
                   "objective": "multi:softprob",
                   "eval_metric": "mlogloss",
                   "verbosity": 1,
                   "num_class": 3,
+                  "seed": 77,
             }
-
-            label_transformer = LabelEncoder()
-            y = label_transformer.fit_transform(y)
-           
-            # Cross validation loop
-            skf = StratifiedKFold(n_splits=args.num_cv, random_state=42, shuffle=True)
-
-            val_scores = []
-            train_scores = []
-            best_iterations = []
-            for train_index, val_index in skf.split(X, y):
-                X_train, X_val = X.loc[train_index], X.loc[val_index]
-                y_train, y_val = y[train_index], y[val_index]
-
-                pipe.fit(X_train, y_train)
-
-                _X_train = pipe.transform(X_train)
-                _X_val  = pipe.transform(X_val)
-
-                dtrain = xgb.DMatrix(_X_train, label=y_train)
-                dval   = xgb.DMatrix(_X_val, label=y_val)
-
-                start = time.time()
-                print("xbg train..")
-                eval_r = {}
-                _model = xgb.train(params=xgb_params, dtrain=dtrain, num_boost_round=num_boost_round,
-                                   evals=[(dtrain, "train"), (dval, "val")],
-                                   early_stopping_rounds=20,
-                                   evals_result=eval_r,
-                                   verbose_eval=50,
-                                   xgb_model=None)
-                train_time = (time.time() - start)
-                print("..done. {} secs".format(train_time))
-
-
-                y_pred_proba = _model.predict(dval, iteration_range=(0, _model.best_iteration))
-                y_pred = np.argmax(y_pred_proba,axis=1)
-                print(classification_report(y_val, y_pred, digits=4))
-
-                custom_metrics = {
-                    'val_log_loss':  log_loss(y_val, y_pred_proba),
-                    'val_micro_f1':  f1_score(y_val, y_pred, average="micro"),
-                    #'val_macro_f1':  f1_score(y_val, y_pred, average="macro"),
-                    #'val_weighted_f1':  f1_score(y_val, y_pred, average="weighted"),
-                    #'val_roc_auc':  roc_auc_score(y_val, y_pred_proba, multi_class="ovo"),
-                }
-
-                y_pred_proba = _model.predict(dtrain, iteration_range=(0, _model.best_iteration))
-                y_pred = np.argmax(y_pred_proba,axis=1)
-
-                custom_metrics.update({
-                    'train_log_loss':  log_loss(y_train, y_pred_proba),
-                    'train_micro_f1':  f1_score(y_train, y_pred, average="micro"),
-                    #'train_macro_f1':  f1_score(y_train, y_pred, average="macro"),
-                    #'train_weighted_f1':  f1_score(y_train, y_pred, average="weighted"),
-                    #'train_roc_auc':  roc_auc_score(y_train, y_pred_proba, multi_class="ovo"),
-                })
-                print(classification_report(y_train, y_pred, digits=4))
-
-                custom_metrics.update({
-                    "train_seconds": train_time,
-                    "step": trial.number,
-                })
-
-                print("Fold metrics:")
-                print(custom_metrics)
-
-                val_scores.append(custom_metrics['val_micro_f1'])
-                train_scores.append(custom_metrics['train_micro_f1'])
-                best_iterations.append(_model.best_iteration)
-                
-                
-            print("Train Scores: {}".format(train_scores))
-            print("Val Scores: {}".format(val_scores))
-            print("Best iterations: {}".format(best_iterations))
-                
+          
+            _, _, val_scores, train_scores = run_one_xgboost(
+                X, y, pipe, num_boost_round, num_boost_round_final=None, params=xgb_params, exp=exp)
+          
             if exp is not None:
                 exp.log_metric("mean_val_score", np.mean(val_scores), step=trial.number)
                 exp.log_metric("mean_train_score", np.mean(train_scores), step=trial.number)
                 exp.log_text(xgb_params, step=trial.number)
-                exp.log_text(num_boost_round, step=trial.number)
-                
-            
-            # Now train final model on full dataset; output preds
-            pipe.fit(X, y)
-            _X_train = pipe.transform(X)
-            y_train = y
-            _X_test  = pipe.transform(X_test)
-
-            dtrain = xgb.DMatrix(_X_train, label=y_train)
-            dtest  = xgb.DMatrix(_X_test)
-
-            start = time.time()
-            print("xbg train, one last time..")
-            num_boost_round_final = num_boost_round
-            if len(best_iterations) > 1:
-                num_boost_round_final = np.rint(np.mean(best_iterations)).astype(int)
-            num_boost_round_final = num_boost_round_final+300
-            print("num_boost_round_final: {}".format(num_boost_round_final))
-            _model = xgb.train(params=xgb_params, 
-                               dtrain=dtrain, 
-                               num_boost_round=num_boost_round_final, 
-                               xgb_model=None,
-                               #evals=[(dtrain, "train"), (dval, "val")],
-                               #early_stopping_rounds=20,
-                               verbose_eval=50,
-                            )
-
-            print("xbg predict..")
-            probas = _model.predict(dtest,  iteration_range=(0,_model.best_iteration))
-            preds = np.argmax(probas, axis=1)
-            preds = label_transformer.inverse_transform(preds)
-
-            print("outputting files..")
-            preds_df = pd.DataFrame(data={'id': test_df[id_col], target_col: preds})
-            preds_fn = os.path.join(out_dir, "{}-{}-{}-preds.csv".format(runname, data_id, trial.number))
-            preds_df.to_csv(preds_fn, index=False)
-            print("tune_eq: Wrote preds file: {}".format(preds_fn))
-
-            probas_df = pd.DataFrame(probas, columns=["1", "2", "3"])
-            probas_df[id_col] = test_df[id_col]
-            probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
-            probas_fn = os.path.join(out_dir, "{}-{}-{}-probas.csv".format(runname, data_id, trial.number))
-            probas_df.to_csv(probas_fn, index=False)
-            print("tune_eq: Wrote probas file: {}".format(probas_fn))
-            
             
             return np.mean(val_scores)
        
@@ -586,10 +593,7 @@ def main():
                            n_trials=args.n_trials, 
                            gc_after_trial=True)
         elif args.algo_set == 2:
-            study.optimize(lambda trial: xgb_objective(trial, X, y, 
-                                                   booster="gbtree",
-                                                   grow_policy="lossguide",
-                                                   scale_pos_weight=args.scale_pos_weight,), 
+            study.optimize(lambda trial: xgb_objective(trial, X, y, exp), 
                            n_trials=args.n_trials, 
                            gc_after_trial=True)
         
