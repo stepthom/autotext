@@ -12,13 +12,15 @@ import sys
 
 import scipy.stats
 import json
+from json.decoder import JSONDecodeError
 import socket
 import datetime
 
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
 from sklearn.impute import SimpleImputer
-#from lightgbm import LGBMClassifier
+from lightgbm import LGBMClassifier
+from xgboost import XGBClassifier
 import xgboost as xgb
 import lightgbm as lgbm
 from sklearn.model_selection import train_test_split
@@ -28,10 +30,25 @@ from sklearn.metrics import classification_report, f1_score
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import log_loss, accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score, classification_report
 from sklearn.model_selection import StratifiedKFold
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import KBinsDiscretizer
+
+from sklearn.experimental import enable_hist_gradient_boosting  # noqa
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.compose import make_column_selector
+
+from autofeat import AutoFeatRegressor, AutoFeatClassifier, AutoFeatLight
+
 import optuna
 import time
 
 from functools import partial
+import json
+
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, FunctionTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.compose import ColumnTransformer
 
 from SteveHelpers import dump_json, get_data_types
 from SteveHelpers import SteveCorexWrapper
@@ -45,327 +62,172 @@ from SteveHelpers import SteveMissingIndicator
 from SteveHelpers import SteveNumericImputer
 from SteveHelpers import SteveCategoryImputer
 from SteveHelpers import SteveCategoryCoalescer
-from SteveHelpers import check_dataframe
+from SteveHelpers import check_dataframe, check_array
 
-def run_one_lgbm(X, y, args, num_boost_round, num_boost_round_final, params, exp=None, X_test=None):
+def estimate_metrics(X, y, pipe_args, estimator, num_cv=5):
     """
     X, y: features and target
-    args: command line args
-    num_boost_rounds: for CV
-    num_boost_rounds: for final fit
-    params: lgbm params
-    exp: comet experiment object
-    X_test: for making predictions, if args.retrain_full_model is set
+    args: args to control FE pipeline
+    estimator
     
-    Returns:
-    probas: predicted probabilies if train_full_model is true, else None
-    preds: predicted classes if train_full_model is true, else None
+    Returns metrics, such as:
     val_scores: estimated val score for each each CV fold
     train_scores: estimated val score for each each CV fold
     """
-    probas = None
-    preds = None
+    metrics = {}
     val_scores = []
     train_scores = []
+    train_times = []
     best_iterations = []
     
-    print("run_one_lgbm: args: {}".format(args))
-    print("run_one_lgbm: params: {}".format(params))
-    print("run_one_lgbm: num_boost_round (for cv): {}".format(num_boost_round))
-    print("run_one_lgbm: num_boost_round_final: {}".format(num_boost_round_final))
+    print("estimate_metrics: pipe_args: {}".format(pipe_args))
+    print("estimate_metrics: estimator: {}".format(estimator))
           
-    label_transformer = LabelEncoder()
-    y = label_transformer.fit_transform(y)
+    skf = StratifiedKFold(n_splits=num_cv, random_state=42, shuffle=True)
 
-    # Cross validation loop?
-    if args['num_cv'] > 1:
-        skf = StratifiedKFold(n_splits=args['num_cv'], random_state=42, shuffle=True)
+    cv_step = -1
+    for train_index, val_index in skf.split(X, y):
+        cv_step = cv_step + 1
+        print("estimate_metrics: cv_step {} of {}".format(cv_step, num_cv))
 
-        cv_step = -1
-        for train_index, val_index in skf.split(X, y):
-            cv_step = cv_step + 1
-            print("run_one_lgbm: cv_step {} of {}".format(cv_step, args['num_cv']))
+        X_train, X_val = X.loc[train_index], X.loc[val_index]
+        y_train, y_val = y[train_index], y[val_index]
+
+        steps = get_pipeline_steps(pipe_args)
+        pipe = Pipeline(steps)
+
+        pipe.fit(X_train, y_train)
+
+        _X_train = pipe.transform(X_train)
+        _X_val  = pipe.transform(X_val)
+
+        check_array(_X_train, "_X_train")
+        check_array(_X_val, "_X_val")
+        
+        extra_fit_params = {}
+        if isinstance (estimator, LGBMClassifier) or isinstance(estimator, XGBClassifier):
+            extra_fit_params.update({
+                'eval_set': [(_X_val, y_val)],
+                'early_stopping_rounds':20,
+                'verbose': 50,
+            })
+
+        start = time.time()
+        print("estimate_metric: fitting...: ")
+        estimator.fit(_X_train, y_train, **extra_fit_params)
+        train_times.append((time.time() - start))
+
+        print("estimate_metric: Val: ")
+        y_val_pred_proba = estimator.predict_proba(_X_val)
+        y_val_pred = estimator.predict(_X_val)
+        val_scores.append(f1_score(y_val, y_val_pred, average="micro"))
+        print(classification_report(y_val, y_val_pred, digits=4))
+
+        print("estimate_metric: Train: ")
+        y_train_pred_proba = estimator.predict_proba(_X_train)
+        y_train_pred = estimator.predict(_X_train)
+        train_scores.append(f1_score(y_train, y_train_pred, average="micro"))
+        print(classification_report(y_train, y_train_pred, digits=4))
+
+        bi = None
+        if hasattr(estimator, 'best_iteration_'):
+            bi = estimator.best_iteration_
+        elif hasattr(estimator, 'best_iteration'):
+            bi = estimator.best_iteration
+        if bi is not None:
+            best_iterations.append(bi)
           
-            X_train, X_val = X.loc[train_index], X.loc[val_index]
-            y_train, y_val = y[train_index], y[val_index]
-            
-            pipe = get_pipeline(X_train, y_train, args)
-            
-            pipe.fit(X_train, y_train)
+    def mean_confidence_interval(data, confidence=0.95):
+        a = 1.0 * np.array(data)
+        n = len(a)
+        m, se = np.mean(a), scipy.stats.sem(a)
+        h = se * scipy.stats.t.ppf((1 + confidence) / 2., n-1)
+        return m, m-h, m+h
 
-            _X_train = pipe.transform(X_train)
-            _X_val  = pipe.transform(X_val)
-          
-            check_dataframe(_X_train, "_X_train")
-            check_dataframe(_X_val, "_X_val")
-            print("y_train value counts:")
-            print(np.unique(y_train))
-            print(np.bincount(y_train))
-            print(pd.Series(y_train).value_counts())
-            print("y_val value counts:")
-            print(np.unique(y_val))
-            print(np.bincount(y_val))
-            print(pd.Series(y_val).value_counts())
-            
-            dtrain = lgbm.Dataset(_X_train, label=y_train)
-            dval   = lgbm.Dataset(_X_val, label=y_val)
-
-            start = time.time()
-            print("run_one_lgbm: cv lgbm train..")
-            eval_r = {}
-            _model = lgbm.train(params=params, 
-                               train_set=dtrain, 
-                               num_boost_round=num_boost_round,
-                               valid_sets=[dval, dtrain],
-                               valid_names=["val", "train"],
-                               early_stopping_rounds=20,
-                               evals_result=eval_r,
-                               verbose_eval=50)
-            train_time = (time.time() - start)
-            print("..done lgbm training in {} secs".format(train_time))
-
-            print("run_one_lgbm: calculating val metrics..")
-            y_val_pred_proba = _model.predict(_X_val)
-            y_val_pred = np.argmax(y_val_pred_proba,axis=1)
-            val_micro_f1 = f1_score(y_val, y_val_pred, average="micro")
-            print(classification_report(y_val, y_val_pred, digits=4))
-
-            print("run_one_lgbm: calculating train metrics..")
-            y_train_pred_proba = _model.predict(_X_train)
-            y_train_pred = np.argmax(y_train_pred_proba,axis=1)
-            train_micro_f1 = f1_score(y_train, y_train_pred, average="micro")
-            print(classification_report(y_train, y_train_pred, digits=4))
-
-            val_scores.append(val_micro_f1)
-            train_scores.append(train_micro_f1)
-            best_iterations.append(_model.best_iteration)
-          
-
-        def mean_confidence_interval(data, confidence=0.95):
-            a = 1.0 * np.array(data)
-            n = len(a)
-            m, se = np.mean(a), scipy.stats.sem(a)
-            h = se * scipy.stats.t.ppf((1 + confidence) / 2., n-1)
-            return m, m-h, m+h
-              
-        print("run_one_lgbm: cv complete.")
-        print("run_one_lgbm: Train Scores: {}".format(train_scores))
-        print("run_one_lgbm: Val Scores: {}".format(val_scores))
-        print("run_one_lgbm: Val Score range: {}".format(mean_confidence_interval(val_scores)))
-        print("run_one_lgbm: Best iterations: {}".format(best_iterations))
-        print("run_one_lgbm: Best iteration range: {}".format(mean_confidence_interval(best_iterations)))
-
-   
-    if args['train_full_model']== 1: 
-        print("run_one_lgbm: Training full model.")
-        pipe = get_pipeline(X, y, args)
-        pipe.fit(X, y)
-        _X = pipe.transform(X)
-        _X_test  = pipe.transform(X_test)
-
-        dtrain = lgbm.Dataset(_X, label=y)
-
-        if num_boost_round_final is None:
-            if args['num_cv']< 1:
-                print("Error: num_boost_round_final is None, but CV was not run.")
-            num_boost_round_final = np.rint(np.mean(best_iterations)*1.1).astype(int)
-          
-        print("run_one_lgbm: num_boost_round_final: {}".format(num_boost_round_final))
-        _model = lgbm.train(params=params,  train_set=dtrain, 
-                           num_boost_round=num_boost_round_final, verbose_eval=50)
-
-        print("lgbm predict..")
-        probas = _model.predict(_X_test)
-        preds = np.argmax(probas, axis=1)
-        preds = label_transformer.inverse_transform(preds)
-          
-    return probas, preds, val_scores, train_scores, best_iterations
-
-def run_one_xgboost(X, y, args, num_boost_round, num_boost_round_final, params, exp=None, X_test=None):
-    """
-    pipe: preprocessing/FE pipeline to fit/use
-    args: command line args
-    num_boost_rounds: for CV
-    num_boost_rounds: for final fit
-    params: xgb params
-    exp: comet experiment object
+    metrics['val_scores'] = val_scores
+    metrics['val_scores_range'] = mean_confidence_interval(val_scores)
+    metrics['train_scores'] = train_scores
+    bir = []
+    if len(best_iterations) > 0:
+        bir = mean_confidence_interval(best_iterations)
+    metrics['best_iterations_range'] = bir
+    metrics['train_times'] = train_times
     
-    Returns:
-    probas: predicted probabilies if train_full_model is true, else None
-    preds: predicted classes if train_full_model is true, else None
-    val_scores: estimated val score for each each CV fold
-    train_scores: estimated val score for each each CV fold
-    """
-    probas = None
-    preds = None
-    val_scores = []
-    train_scores = []
-    best_iterations = []
-    
-    print("run_one_xgboost: args: {}".format(args))
-    print("run_one_xgboost: params: {}".format(params))
-    print("run_one_xgboost: num_boost_round (for cv): {}".format(num_boost_round))
-    print("run_one_xgboost: num_boost_round_final: {}".format(num_boost_round_final))
+    print("estimate_metrics: cv complete.")
+    print("estimate_metrics: metrics:")
+    print(metrics)
           
-    label_transformer = LabelEncoder()
-    y = label_transformer.fit_transform(y)
+    return metrics
 
-    # Cross validation loop?
-    if args['num_cv']> 1:
-        skf = StratifiedKFold(n_splits=args['num_cv'], random_state=42, shuffle=True)
 
-        cv_step = -1
-        for train_index, val_index in skf.split(X, y):
-            cv_step = cv_step + 1
-            print("run_one_xgboost: cv_step {} of {}".format(cv_step, args['num_cv']))
-          
-            X_train, X_val = X.loc[train_index], X.loc[val_index]
-            y_train, y_val = y[train_index], y[val_index]
-            pipe = get_pipeline(X_train, y_train, args)
-            
-            pipe.fit(X_train, y_train)
-
-            _X_train = pipe.transform(X_train)
-            _X_val  = pipe.transform(X_val)
-          
-            check_dataframe(_X_train, "_X_train")
-            check_dataframe(_X_val, "_X_val")
-            print("y_train value counts:")
-            print(np.unique(y_train))
-            print(np.bincount(y_train))
-            print(pd.Series(y_train).value_counts())
-            print("y_val value counts:")
-            print(np.unique(y_val))
-            print(np.bincount(y_val))
-            print(pd.Series(y_val).value_counts())
-            
-            dtrain = xgb.DMatrix(_X_train, label=y_train)
-            dval   = xgb.DMatrix(_X_val, label=y_val)
-
-            start = time.time()
-            print("run_one_xgboost: cv xgb train..")
-            eval_r = {}
-            _model = xgb.train(params=params, 
-                               dtrain=dtrain, 
-                               num_boost_round=num_boost_round,
-                               evals=[(dtrain, "train"), (dval, "val")],
-                               early_stopping_rounds=20,
-                               evals_result=eval_r,
-                               verbose_eval=50)
-            train_time = (time.time() - start)
-            print("..done xgb training in {} secs".format(train_time))
-
-            print("run_one_xgboost: calculating val metrics..")
-            y_val_pred_proba = _model.predict(dval, iteration_range=(0, _model.best_iteration))
-            y_val_pred = np.argmax(y_val_pred_proba,axis=1)
-            val_micro_f1 = f1_score(y_val, y_val_pred, average="micro")
-            print(classification_report(y_val, y_val_pred, digits=4))
-
-            print("run_one_xgboost: calculating train metrics..")
-            y_train_pred_proba = _model.predict(dtrain, iteration_range=(0, _model.best_iteration))
-            y_train_pred = np.argmax(y_train_pred_proba,axis=1)
-            train_micro_f1 = f1_score(y_train, y_train_pred, average="micro")
-            print(classification_report(y_train, y_train_pred, digits=4))
-
-            val_scores.append(val_micro_f1)
-            train_scores.append(train_micro_f1)
-            best_iterations.append(_model.best_iteration)
-          
-
-        def mean_confidence_interval(data, confidence=0.95):
-            a = 1.0 * np.array(data)
-            n = len(a)
-            m, se = np.mean(a), scipy.stats.sem(a)
-            h = se * scipy.stats.t.ppf((1 + confidence) / 2., n-1)
-            return m, m-h, m+h
-              
-        print("run_one_xgboost: cv complete.")
-        print("run_one_xgboost: Train Scores: {}".format(train_scores))
-        print("run_one_xgboost: Val Scores: {}".format(val_scores))
-        print("run_one_xgboost: Val Score range: {}".format(mean_confidence_interval(val_scores)))
-        print("run_one_xgboost: Best iterations: {}".format(best_iterations))
-        print("run_one_xgboost: Best iteration range: {}".format(mean_confidence_interval(best_iterations)))
-
-   
-    if args['train_full_model']== 1: 
-        print("run_one_xgboost: Training full model.")
-        pipe = get_pipeline(X, y, args)
-        pipe.fit(X, y)
-        _X = pipe.transform(X)
-        _X_test  = pipe.transform(X_test)
-
-        dtrain = xgb.DMatrix(_X, label=y)
-        dtest  = xgb.DMatrix(_X_test)
-
-        if num_boost_round_final is None:
-            if args['num_cv']< 1:
-                print("Error: num_boost_round_final is None, but CV was not run.")
-            num_boost_round_final = np.rint(np.mean(best_iterations)*1.1).astype(int)
-          
-        print("run_one_xgboost: num_boost_round_final: {}".format(num_boost_round_final))
-        _model = xgb.train(params=params, 
-                           dtrain=dtrain, 
-                           num_boost_round=num_boost_round_final, 
-                           xgb_model=None)
-
-        print("xbg predict..")
-        probas = _model.predict(dtest)
-        preds = np.argmax(probas, axis=1)
-        preds = label_transformer.inverse_transform(preds)
-          
-    return probas, preds, val_scores, train_scores, best_iterations
-
-def get_pipeline(X, y, args):
+def get_pipeline_steps(pipe_args):
     # Have to create a new pipeline all the time, thanks to a bug in category_encoders:
     # https://github.com/scikit-learn-contrib/category_encoders/issues/313
     
-    geo_id_set = []
-    if args['geo_id_set']== 1:
-        geo_id_set = ['geo_level_1_id']
-    elif args['geo_id_set']== 2:
-        geo_id_set = ['geo_level_1_id', 'geo_level_2_id']
-    elif args['geo_id_set']== 3:
-        geo_id_set = ['geo_level_1_id', 'geo_level_2_id', 'geo_level_3_id']
+    transformers = []
     
-    cat_cols, num_cols, bin_cols, float_cols, date_cols = get_data_types(X, args['id_col'], args['target_col'])
-    
-    steps = []
-
-    if args['cat_encoder']== 1:
-        pass
-    elif args['cat_encoder']== 2:
-        _cat_cols = list(set(cat_cols) - set(geo_id_set))
-        steps.append(('cat_encoder', SteveEncoder(cols=_cat_cols,
-                      encoder=OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32))))
-        steps.append(('dropper', SteveFeatureDropper(_cat_cols)))
-    elif args['cat_encoder']== 3:
-        _cat_cols = list(set(cat_cols) - set(geo_id_set))
-        steps.append(('cat_encoder', SteveEncoder(cols=_cat_cols,
-                       encoder=OneHotEncoder(handle_unknown='ignore', sparse=False, dtype=np.int32))))
-        steps.append(('dropper', SteveFeatureDropper(_cat_cols)))
-
-    steps.append(('num_capper', SteveNumericCapper(num_cols=['age'], max_val=30)))
-
-    if args['autofeat']== 1:
-        steps.append(('num_autofeat', SteveAutoFeatLight(float_cols)))
-
-    if args['normalize']== 1:
-        steps.append(('num_normalizer', SteveNumericNormalizer(float_cols, drop_orig=True)))
+    _cat_cols = pipe_args.get('cat_cols_ordinal_encode', [])
+    print(_cat_cols)
+    if len(_cat_cols) > 0:
+        transformers.append(
+            ('cat_enc1', 
+             OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32), 
+             _cat_cols)
+        )
         
-    enc =  ce.wrapper.PolynomialWrapper(
-            ce.target_encoder.TargetEncoder(
-                handle_unknown="value", 
-                handle_missing="value", 
-                min_samples_leaf=1, 
-                smoothing=0.1, return_df=True))
+    _cat_cols = pipe_args.get('cat_cols_target_encode', [])
+    print(_cat_cols)
+    if len(_cat_cols) > 0:
+        
+        from sklearn.preprocessing import FunctionTransformer
 
-    steps.append(("cat_enc2", enc))
+        def to_object(x):
+          return pd.DataFrame(x).astype(object)
 
-    print('get_pipeline steps:')
-    for step in steps:
-        print(step)
-    pipe = Pipeline(steps)
-    return pipe
+        fun_tr = FunctionTransformer(to_object)
+        
+        enc =  ce.wrapper.PolynomialWrapper(
+                ce.target_encoder.TargetEncoder(
+                    handle_unknown="value", 
+                    handle_missing="value", 
+                    min_samples_leaf=1, 
+                    smoothing=0.1, return_df=True))
+
+        transformers.append(
+            ('cat_enc2', 
+             Pipeline([
+                 ('cat_enc2_dt', fun_tr),
+                 ('cat_enc2', enc)
+             ]), 
+            _cat_cols))
+    
+    #transformers.append(
+        #('num_capper', SteveNumericCapper(num_cols=['age'], max_val=30)))
+
+    if False and pipe_args.get('autofeat', 0) == 1:
+        transformers.append(
+            ('num_autofeat', 
+             AutoFeatLight(verbose=0, compute_ratio=False, compute_product=True, scale=False), 
+             make_column_selector(dtype_include=np.number))
+        )
+
+    if False and pipe_args.get('normalize', 0) == 1:
+        transformers.append(
+            ('num_scaler', 
+             StandardScaler(),
+             make_column_selector(dtype_include=np.number))
+        )
+        transformers.append(
+            ('num_kbins', 
+            KBinsDiscretizer(n_bins=10, encode='ordinal', strategy='quantile'),
+             make_column_selector(dtype_include=np.number))
+        )
+    
+    steps = [('ct', ColumnTransformer(transformers=transformers,
+                                      remainder = 'passthrough', 
+                                      sparse_threshold=0))]
+    
+    return steps
 
 
 def main():
@@ -377,33 +239,17 @@ def main():
     
     # Comet params
     parser.add_argument('--enable-comet', type=int, default=1)
+    
     # Prep/FE params
-    parser.add_argument('--geo-id-set', type=int, default=3)
-    parser.add_argument('--autofeat', type=int, default=0)
-    parser.add_argument('--normalize', type=int, default=0)
     parser.add_argument('--sample-frac', type=float, default=1.0)
-    parser.add_argument('--cat-encoder', type=int, default=2)
+    parser.add_argument('--pipe-args-file', type=str, default='earthquake/pipe_args_01.json')
     
-    # Search Params
-    
-    # one or optuna
-    parser.add_argument('--run-type', type=str, default="optuna")
-   
-    # if one, then run this trial
-    parser.add_argument('--trial-log', type=str, default=None)
-    
-    # XGBoost/LGBM params
-    parser.add_argument('--algo-set', type=int, default=1)
-    parser.add_argument('--booster', type=str, default='gbtree')
-    parser.add_argument('--grow-policy', type=str, default='lossguide')
-    parser.add_argument('--scale-pos-weight', type=float, default=1.0)
-    parser.add_argument('--num-cv', type=int, default=0)
-    parser.add_argument('--train-full-model', type=int, default=0)
-          
+    parser.add_argument('--estimator-name', type=str, default="lgbm")
+    parser.add_argument('--num-cv', type=int, default=12)
     
     # Optuna params
     parser.add_argument('--sampler', type=str, default='tpe')
-    parser.add_argument('--n-trials', type=int, default=100)
+    parser.add_argument('--n-trials', type=int, default=3)
 
     args = parser.parse_args()
     args = vars(args)
@@ -411,16 +257,13 @@ def main():
     print("Command line arguments:")
     print(args)
 
-    #id_col = 'building_id'
-    #target_col = 'damage_grade'
-    #out_dir = 'earthquake/out'
     data_id = '000'
 
     # Create an experiment with your api key
     exp=None
     if args['enable_comet'] == 1:
         exp = Experiment(
-            project_name="eq_{}".format(args['run_type']),
+            project_name="eq_searcher",
             workspace="stepthom",
             parse_args=False,
             auto_param_logging=False,
@@ -428,10 +271,10 @@ def main():
             log_graph=False
         )
 
-    train_fn =  'earthquake/earthquake_train.csv'
-    test_fn =  'earthquake/earthquake_test.csv'
-    train_df  = pd.read_csv(train_fn)
-    test_df  = pd.read_csv(test_fn)
+    train_fn = 'earthquake/earthquake_train.csv'
+    test_fn = 'earthquake/earthquake_test.csv'
+    train_df = pd.read_csv(train_fn)
+    test_df = pd.read_csv(test_fn)
     if args['sample_frac']< 1.0:
         train_df  = train_df.sample(frac=args['sample_frac'], random_state=3).reset_index(drop=True)
         
@@ -439,21 +282,16 @@ def main():
     y = train_df[args['target_col']]
     X_test = test_df.drop([args['id_col']], axis=1)
     
-    geo_id_set = []
-    if args['geo_id_set']== 1:
-        geo_id_set = ['geo_level_1_id']
-    elif args['geo_id_set']== 2:
-        geo_id_set = ['geo_level_1_id', 'geo_level_2_id']
-    elif args['geo_id_set']== 3:
-        geo_id_set = ['geo_level_1_id', 'geo_level_2_id', 'geo_level_3_id']
-
-    prep1 = Pipeline([
-        ('typer', SteveFeatureTyper(cols=geo_id_set, typestr='category'))
-    ])
-
-    prep1.fit(X)
-    X = prep1.transform(X)
-    X_test = prep1.transform(X_test)
+    label_transformer = LabelEncoder()
+    y = label_transformer.fit_transform(y)
+                 
+    pipe_args = {}
+    with open(args["pipe_args_file"]) as f:
+        try:
+            pipe_args = json.load(f)
+        except JSONDecodeError as e:
+            print("ERROR: cannot parse json file {}".format(args.pipe_arg_file))
+            print(e)
 
     runname = ""
     if exp:
@@ -468,93 +306,32 @@ def main():
         exp.log_other('train_fn', train_fn)
         exp.log_other('test_fn', test_fn)
         exp.log_table('X_head.csv', X.head())
-        exp.log_table('y_head.csv', y.head())
         exp.log_parameters(args)
+        exp.log_parameters(pipe_args)
         exp.log_asset('SteveHelpers.py')
 
-    if args['run_type'] == "one":
-        probas = None
-        preds = None
-        val_scores = None
-        train_scores = None
         
-        run = {}
-        with open(args['trial_log']) as f:
-            try:
-                run = json.load(f)
-            except JSONDecodeError as e:
-                print("ERROR: cannot parse json file {}".format(run_file))
-                print(e)
-       
-        trial_args = run['args']
-        trial_params = run['params']
-        
-        # Update with actual command line args 
-        for key in ['train_full_model', 'num_cv']:
-            trial_args[key] = args[key]
-        num_boost_round = 3500
-        num_boost_round_final = max(run['best_iterations'])
-        
-        if trial_args['algo_set'] == 1:
-            probas, preds, val_scores, train_scores, best_iterations = run_one_lgbm(
-                X, y, trial_args, num_boost_round, num_boost_round_final, trial_params, exp, X_test)
-         
-        elif trial_args['algo_set'] == 2:
-            probas, preds, val_scores, train_scores, best_iterations = run_one_xgboost(
-                X, y, trial_args, num_boost_round, num_boost_round_final, trial_params, exp, X_test)
-        
-        print("val_scores: {}".format(val_scores))
-        print("train_scores: {}".format(train_scores))
-         
-        if preds is not None:
-            preds_df = pd.DataFrame(data={'id': test_df[args['id_col']], args['target_col']: preds})
-            preds_fn = os.path.join(args['out_dir'], "{}-{}-preds.csv".format(runname, data_id))
-            preds_df.to_csv(preds_fn, index=False)
-            print("tune_eq: Wrote preds file: {}".format(preds_fn))
+    def objective(trial, X, y, args, pipe_args, exp, runname):
+        params = {}
+        estimator = None
 
-        if probas is not None:
-            probas_df = pd.DataFrame(probas, columns=["1", "2", "3"])
-            probas_df[args['id_col']] = test_df[args['id_col']]
-            probas_df = probas_df[ [args['id_col']] + [ col for col in probas_df.columns if col != args['id_col'] ] ]
-            probas_fn = os.path.join(args['out_dir'], "{}-{}-probas.csv".format(runname, data_id))
-            probas_df.to_csv(probas_fn, index=False)
-            print("tune_eq: Wrote probas file: {}".format(probas_fn))
-          
-    if args['run_type']== "optuna":
-        
-        def lgbm_objective(trial, X, y, args, exp, runname):
-           
+        if args['estimator_name'] == "lgbm":
             upper = 4096
-            num_boost_round = 3500 
-            num_leaves = trial.suggest_int("num_leaves", 4, upper, log=True)
-            min_data_in_leaf = trial.suggest_int("min_data_in_leaf", 2, 2**7, log=True)
-            min_child_weight = trial.suggest_loguniform("min_child_weight", 0.001, 128)
-            learning_rate = trial.suggest_loguniform("learning_rate", 1/1024, 1.0)
-            feature_fraction_bynode = trial.suggest_float("feature_fraction_bynode", 0.01, 1.0)
-            feature_fraction = trial.suggest_float("feature_fraction", 0.01, 1.0)
-            reg_alpha = trial.suggest_loguniform("reg_alpha", 1/1024, 1024)
-            reg_lambda = trial.suggest_loguniform("reg_lambda", 1/1024, 1024)
-            extra_trees = trial.suggest_categorical("extra_trees", [True, False])
-            
-            
-            #bagging_fraction = trial.suggest_float("bagging_fraction", 0.1, 1.0)
-            bagging_fraction = 1.0
-            bagging_freq = 0
-            
-            lgbm_params = {
-                  "num_leaves": num_leaves,
-                  "min_child_weight": min_child_weight,
-                  "min_data_in_leaf": min_data_in_leaf,
-                  "learning_rate": learning_rate,
-                  "feature_fraction_bynode": feature_fraction_bynode,
-                  "feature_fraction": feature_fraction,
-                  "bagging_fraction": bagging_fraction,
-                  "bagging_freq": bagging_freq,
-                  "reg_alpha": reg_alpha,
-                  "reg_lambda": reg_lambda,
-                  "extra_trees": extra_trees,
-                
-                  "boosting": 'gbdt',
+            params = {
+                  "num_leaves": trial.suggest_int("num_leaves", 4, upper, log=True),
+                  "min_child_weight": trial.suggest_loguniform("min_child_weight", 0.001, 128),
+                  "min_child_samples": trial.suggest_int("min_child_samples", 2, 2**7, log=True),
+                  "learning_rate": trial.suggest_loguniform("learning_rate", 1/1024, 1.0),
+                  "feature_fraction_bynode":  trial.suggest_float("feature_fraction_bynode", 0.01, 1.0),
+                  "colsample_bytree": trial.suggest_float("colsample_bytree", 0.01, 1.0),
+                  "subsample": 1.0,
+                  "subsample_freq": 0,
+                  "reg_alpha": trial.suggest_loguniform("reg_alpha", 1/1024, 1024),
+                  "reg_lambda": trial.suggest_loguniform("reg_lambda", 1/1024, 1024),
+                  "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
+
+                  "n_estimators": 3500,
+                  "boosting_type": 'gbdt',
                   "max_depth": -1,
                   "n_jobs": 5,
                   "objective": "multiclass",
@@ -563,52 +340,22 @@ def main():
                   "seed": 77,
             }
 
-            _, _, val_scores, train_scores, best_iterations = run_one_lgbm(
-                X, y, args, num_boost_round, num_boost_round_final=None, params=lgbm_params, exp=exp, X_test=None)
-          
-            if exp is not None:
-                exp.log_metric("mean_val_score", np.mean(val_scores), step=trial.number)
-                exp.log_metric("mean_train_score", np.mean(train_scores), step=trial.number)
-                exp.log_text(lgbm_params, step=trial.number)
-                
-            # Log for later
-            res = {}
-            res['runname'] = runname
-            res['trial'] = trial.number
-            res['args'] = args
-            res['params'] = lgbm_params
-            res['val_scores'] = val_scores
-            res['train_scores'] = train_scores
-            res['best_iterations'] = best_iterations
-            json_fn = os.path.join(args['out_dir'], "{}-trial-{}.json".format(runname, trial.number))
-            dump_json(json_fn, res)
+            estimator = LGBMClassifier(**params)
             
-            return np.mean(val_scores)
-       
-        def xgb_objective(trial, X, y, args, exp, runname):
+        elif args['estimator_name'] == "xgboost":
             upper = 4096
-            num_boost_round = 2500 # trial.suggest_int("num_boost_round", 4, upper, log=True)
-            max_leaves = trial.suggest_int("max_leaves", 4, upper, log=True)
-            min_child_weight = trial.suggest_loguniform("min_child_weight", 0.001, 128)
-            learning_rate = trial.suggest_loguniform("learning_rate", 1/1024, 1.0)
-            subsample = trial.suggest_float("subsample", 0.1, 1.0)
-            colsample_bylevel = trial.suggest_float("colsample_bylevel", 0.01, 1.0)
-            colsample_bytree = trial.suggest_float("colsample_bytree", 0.01, 1.0)
-            reg_alpha = trial.suggest_loguniform("reg_alpha", 1/1024, 1024)
-            reg_lambda = trial.suggest_loguniform("reg_lambda", 1/1024, 1024)
-            gamma = trial.suggest_loguniform("gamma", 1/1024, 128)
-            
-            xgb_params = {
-                  "max_leaves": max_leaves,
-                  "min_child_weight": min_child_weight,
-                  "learning_rate": learning_rate,
-                  "subsample": subsample,
-                  "colsample_bylevel": colsample_bylevel,
-                  "colsample_bytree": colsample_bytree,
-                  "reg_alpha": reg_alpha,
-                  "reg_lambda": reg_lambda,
-                  "gamma": gamma,
-                
+            params = {
+                  "max_leaves": trial.suggest_int("max_leaves", 4, upper, log=True),
+                  "min_child_weight": trial.suggest_loguniform("min_child_weight", 0.001, 128),
+                  "learning_rate": trial.suggest_loguniform("learning_rate", 1/1024, 1.0),
+                  "subsample": trial.suggest_float("subsample", 0.1, 1.0),
+                  "colsample_bylevel": trial.suggest_float("colsample_bylevel", 0.01, 1.0),
+                  "colsample_bytree": trial.suggest_float("colsample_bytree", 0.01, 1.0),
+                  "reg_alpha": trial.suggest_loguniform("reg_alpha", 1/1024, 1024),
+                  "reg_lambda": trial.suggest_loguniform("reg_lambda", 1/1024, 1024),
+                  "gamma": trial.suggest_loguniform("gamma", 1/1024, 128),
+
+                  "n_estimators": 3500,
                   "booster": "gbtree",
                   "max_depth": 0,
                   "grow_policy": "lossguide",
@@ -620,58 +367,92 @@ def main():
                   "num_class": 3,
                   "seed": 77,
             }
-          
-            _, _, val_scores, train_scores, best_iterations = run_one_xgboost(
-                X, y, args, num_boost_round, num_boost_round_final=None, params=xgb_params, exp=exp, X_test=None)
-          
-            if exp is not None:
-                exp.log_metric("mean_val_score", np.mean(val_scores), step=trial.number)
-                exp.log_metric("mean_train_score", np.mean(train_scores), step=trial.number)
-                exp.log_text(xgb_params, step=trial.number)
+            estimator = XGBClassifier(**params)
+        elif args['estimator_name'] == "rf":
+            upper = 4096
+            params = {
+                  "n_estimators": trial.suggest_int("n_estimators", 4, upper, log=True),
+                  "max_leaf_nodes": trial.suggest_int("max_leaf_nodes", 4, upper, log=True),
+                  "max_features": trial.suggest_float("max_features", 0.1, 1.0),
+                  "criterion": trial.suggest_categorical("criterion", ['gini', 'entropy']),
+                  "class_weight": trial.suggest_categorical("class_weight", ['balanced', None]),
+                  "ccp_alpha": trial.suggest_loguniform("ccp_alpha", 1/1024, 1024),
                 
-            # Log for later
-            res = {}
-            res['runname'] = runname
-            res['trial'] = trial.number
-            res['args'] = args
-            res['params'] = xgb_params
-            res['val_scores'] = val_scores
-            res['train_scores'] = train_scores
-            res['best_iterations'] = best_iterations
-            json_fn = os.path.join(args['out_dir'], "{}-trial-{}.json".format(runname, trial.number))
-            dump_json(json_fn, res)
-            
-            return np.mean(val_scores)
-       
-        sampler = None
-        if args['sampler'] == "tpe":
-            sampler = optuna.samplers.TPESampler()
-        elif args['sampler'] == "motpe":
-            sampler = optuna.samplers.MOTPESampler()
-        elif args['sampler'] == "random":
-            sampler = optuna.samplers.RandomSampler()
-        
-        study = optuna.create_study(study_name=runname, sampler=sampler, direction="maximize")
-        
-        if args['algo_set'] == 1:
-            study.optimize(lambda trial: lgbm_objective(trial, X, y, args, exp, runname),
-                           n_trials=args['n_trials'], 
-                           gc_after_trial=True)
-        elif args['algo_set']== 2:
-            study.optimize(lambda trial: xgb_objective(trial, X, y, args, exp, runname), 
-                           n_trials=args['n_trials'], 
-                           gc_after_trial=True)
-        
-        print(study.best_params)
-        print(study.best_value)
-        print(study.best_trial)
-        print(study.trials_dataframe())
+                  "random_state": 77,
+                  "n_jobs": 5,
+            }
+            estimator = RandomForestClassifier(**params)
+        elif args['estimator_name'] == "lr":
+            params = {
+                  "penalty": trial.suggest_categorical("penalty", ['l1', 'l2', 'elasticnet', 'none']),
+                  "C": trial.suggest_loguniform("C", 1/1024, 1024),
+                  "class_weight": trial.suggest_categorical("class_weight", ['balanced', None]),
+                  "l1_ratio": trial.suggest_float("l1_ratio", 0.0, 1.0),
+               
+                  "solver": "saga",
+                  "random_state": 77,
+                  "n_jobs": 5,
+                  "max_iter": 2000,
+            }
+            estimator = LogisticRegression(**params)
+        elif args['estimator_name'] == "hist":
+            upper = 400
+            params = {
+                  "max_iter": trial.suggest_int("max_iter", 4, upper, log=True),
+                  "max_leaf_nodes": trial.suggest_int("max_leaf_nodes", 4, upper*2, log=True),
+                  "learning_rate": trial.suggest_loguniform("learning_rate", 0.05, 1.0),
+                  "l2_regularization": trial.suggest_loguniform("l2_regularization", 1/1024, 1024),
+               
+                  "random_state": 77,
+            }
+            estimator = HistGradientBoostingClassifier(**params)
+        else:
+            print("Unknown estimator name {}".format(estimator_name))
+
+        metrics = estimate_metrics(X, y, pipe_args, estimator, args['num_cv'])
+
         if exp is not None:
-            exp.log_table('optuna_trials.csv', study.trials_dataframe())
-            exp.log_figure('Opt history', optuna.visualization.plot_optimization_history(study))
-            exp.log_figure('Hyperparam importance', optuna.visualization.plot_param_importances(study))
-            
-        return
+            exp.log_metric("mean_val_score", np.mean(metrics['val_scores']), step=trial.number)
+            exp.log_metric("mean_train_score", np.mean(metrics['train_scores']), step=trial.number)
+            exp.log_text(params, step=trial.number)
+
+        # Log for later
+        res = {}
+        res['runname'] = runname
+        res['trial'] = trial.number
+        res['args'] = args
+        res['pipe_args'] = pipe_args
+        res['params'] = params
+        res['metrics'] = metrics
+        json_fn = os.path.join(args['out_dir'], "{}-trial-{}.json".format(runname, trial.number))
+        dump_json(json_fn, res)
+
+        return np.mean(metrics['val_scores'])
+       
+    sampler = None
+    if args['sampler'] == "tpe":
+        sampler = optuna.samplers.TPESampler()
+    elif args['sampler'] == "motpe":
+        sampler = optuna.samplers.MOTPESampler()
+    elif args['sampler'] == "random":
+        sampler = optuna.samplers.RandomSampler()
+
+    study = optuna.create_study(study_name=runname, sampler=sampler, direction="maximize")
+
+    study.optimize(lambda trial: objective(trial, X, y, args, pipe_args, exp, runname),
+                    n_trials=args['n_trials'], 
+                    gc_after_trial=True)
+
+    print(study.best_params)
+    print(study.best_value)
+    print(study.best_trial)
+    print(study.trials_dataframe())
+    if exp is not None:
+        exp.log_table('optuna_trials.csv', study.trials_dataframe())
+        exp.log_figure('Opt history', optuna.visualization.plot_optimization_history(study))
+        exp.log_figure('Hyperparam importance', optuna.visualization.plot_param_importances(study))
+
+    return
     
 if __name__ == "__main__":
     main()

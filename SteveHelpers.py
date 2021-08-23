@@ -48,6 +48,44 @@ def dump_json(fn, json_obj):
 
     with open(fn, 'w') as fp:
         json.dump(json_obj, fp, indent=4, cls=NumpyEncoder)
+        
+def check_array(array, name="array", full=True):
+    print("=============================")
+    print("{} shape: {}".format(name, array.shape))
+    print(array[0:5, :])
+    print(array[-5:-1, :])
+    has_a_inf = np.isinf(array).any().any()
+    print("Any inf?: {}".format(has_a_inf))
+    has_a_nan = np.isnan(array).any().any()
+    print("Any nan?: {}".format(has_a_nan))
+    #print("nan: {}".format(np.argwhere(np.isnan(array))))
+    print(array[17230,:])
+        
+def check_dataframe(df, name="df", full=True):
+    print("=============================")
+    print("{} shape: {}".format(name, df.shape))
+    if full:
+        print("columns: {}".format(list(df.columns)))
+     
+    has_a_inf = np.isinf(df).any().any()
+    print("Any inf?: {}".format(has_a_inf))
+    has_a_nan = df.isnull().any().any()
+    print("Any nan?: {}".format(has_a_nan))
+    if has_a_nan:
+        tmp = df.isnull().sum(axis=0)
+        tmp = tmp[tmp>0]
+        print("{} cols with nan:".format(len(tmp)))
+        print(tmp[tmp>0])
+        print("Number of rows with nan: {}".format(df.isnull().sum(axis = 1).sum()))
+    #print("Any duplicates?: {}".format(df.duplicated().any()))
+    dup_mask = df.duplicated(keep=False)
+    print("Number of duplicates: {}".format(dup_mask.sum()))
+    if dup_mask.sum() > 0:
+        print("First 20 duplicate rows:")
+        print(df[dup_mask].sort_values(by=list(df.columns),axis=0).head())
+        
+    
+    
 
 class SteveCorexWrapper(BaseEstimator, TransformerMixin):
     def __init__(self, bin_cols=None, drop_orig=False, n_hidden=4, dim_hidden=2, smooth_marginals=False):
@@ -382,26 +420,41 @@ class SteveCategoryImputer(BaseEstimator, TransformerMixin):
         return _X
     
 class SteveEncoder(BaseEstimator, TransformerMixin):
-    def __init__(self, cols=None, encoder=None):
+    def __init__(self, cols=None, encoder=None, suffix="_enc"):
         self.cols = cols
         self.encoder = encoder
+        self.suffix = suffix
         
     def fit(self, X, y=None):
+        #print('SteveEncoder')
+        #print(self.cols)
+        #print(self.encoder)
+        #print(type(X))
+        #print(X.shape)
         self.encoder.fit(X[self.cols], y)
         return self
 
     def transform(self, X, y=None):
         _X = X.copy()
+        #print('steve encoder')
+        #print(_X.shape)
+        #print(_X.columns)
         
         _new_cols = self.encoder.transform(_X[self.cols])
-        colnames = ["{}_enc".format(i) for i in range(_new_cols.shape[1])]
+        colnames = ["{}_{}".format(i, self.suffix) for i in range(_new_cols.shape[1])]
         if hasattr(self.encoder, "get_feature_names"):
             colnames = self.encoder.get_feature_names(self.cols)
             
         # Make sure no weird values snuck in; LGBM will complain
         colnames = [re.sub('[^A-Za-z0-9_]+', 'J', x) for x in colnames]
+        #print(colnames)
         _new_cols = pd.DataFrame(_new_cols, columns=colnames)
-        _X = pd.concat([_X, _new_cols], axis=1, ignore_index=False)
+        #print(_new_cols.shape)
+        #print(_X.head())
+        _X = pd.concat([_X.reset_index(drop=True), _new_cols.reset_index(drop=True)], axis=1, ignore_index=False)
+        #print("After concat")
+        #print(_X.shape)
+        #print(_X.head())
         
         return _X
     
@@ -552,10 +605,10 @@ class SteveAutoFeatLight(BaseEstimator, TransformerMixin):
     
     def transform(self, X, y=None):
         _X = X.copy()
-    
+   
         _new_cols = self.autofeat.transform(_X[self.num_cols])
         # Autofit will create duplicate columns - remove
-        _new_cols = _new_cols.drop(self.num_cols, axis=1)
+        _new_cols = _new_cols.drop(self.num_cols, axis=1, errors='ignore')
        
         print("SteveautoFeatLight: Column names:")
         for i in range(_new_cols.shape[1]):
