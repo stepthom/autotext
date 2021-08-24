@@ -13,6 +13,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from pandas.api.types import is_numeric_dtype
 from autofeat import AutoFeatRegressor, AutoFeatClassifier, AutoFeatLight
 
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, FunctionTransformer, OrdinalEncoder
 from sklearn.preprocessing import KBinsDiscretizer
 from sklearn.decomposition import KernelPCA
@@ -27,8 +28,79 @@ from pandas.api.types import is_numeric_dtype
 from sklearn.model_selection import StratifiedKFold
 import category_encoders as ce
 from category_encoders.wrapper import PolynomialWrapper
+from sklearn.impute import SimpleImputer
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import FunctionTransformer
+from sklearn.compose import make_column_selector
 
 import geopy.distance
+
+def get_pipeline_steps(pipe_args):
+    # Have to create a new pipeline all the time, thanks to a bug in category_encoders:
+    # https://github.com/scikit-learn-contrib/category_encoders/issues/313
+    
+    steps = []
+    
+    _drop_cols = pipe_args.get('drop_cols', [])
+    if len(_drop_cols) > 0:
+        steps.append(('ddropper', SteveFeatureDropper(_drop_cols)))
+
+    _cat_cols = pipe_args.get('cat_cols_ordinal_encode', [])
+    if len(_cat_cols) > 0:
+        steps.append(
+            ('cat_encoder', 
+             SteveEncoder(
+                 cols=_cat_cols,
+                 encoder=OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
+                 suffix="_oenc"
+             )))
+        steps.append(('odropper', SteveFeatureDropper(_cat_cols)))
+       
+        #steps.append(('otyper', SteveFeatureTyper(like="_oenc", typestr='category')))
+        
+        
+    _cat_cols = pipe_args.get('cat_cols_onehot_encode', [])
+    if len(_cat_cols) > 0:
+        steps.append(
+            ('cat_enc1', 
+             SteveEncoder(
+                 cols=_cat_cols,
+                 encoder=OneHotEncoder(handle_unknown='ignore', sparse=False, dtype=np.int32),
+                 suffix="_oheenc")
+            ))
+        steps.append(('phedropper', SteveFeatureDropper(_cat_cols)))
+        
+    _cat_cols = pipe_args.get('cat_cols_target_encode', [])
+    if len(_cat_cols) > 0:
+        steps.append(('typer', SteveFeatureTyper(cols=_cat_cols, typestr='category')))
+        enc =  ce.wrapper.PolynomialWrapper(
+                ce.target_encoder.TargetEncoder(
+                    handle_unknown="value", 
+                    handle_missing="value", 
+                    min_samples_leaf=1, 
+                    smoothing=0.1, return_df=True))
+
+        steps.append(
+            ('cat_enc2', 
+             SteveEncoder( cols=_cat_cols, encoder=enc, suffix="_tenc"
+             )))
+        
+        steps.append(('tdropper', SteveFeatureDropper(_cat_cols)))
+
+    steps.append(('num_capper', SteveNumericCapper(num_cols=['age'], max_val=30)))
+
+    _float_cols = pipe_args.get('float_cols', [])
+    if len(_float_cols) > 0 and pipe_args.get('autofeat', 0) == 1:
+        steps.append(('num_autofeat', SteveAutoFeatLight(_float_cols, compute_ratio=True, compute_product=True, scale=True)))
+
+    if len(_float_cols) > 0 and pipe_args.get('normalize', 0) == 1:
+        steps.append(('num_normalizer', SteveNumericNormalizer(_float_cols, drop_orig=True)))
+        
+    print('get_pipeline steps:')
+    for step in steps:
+        print(step)
+    return steps
+
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -441,14 +513,15 @@ class SteveEncoder(BaseEstimator, TransformerMixin):
         #print(_X.columns)
         
         _new_cols = self.encoder.transform(_X[self.cols])
+        
         colnames = ["{}_{}".format(i, self.suffix) for i in range(_new_cols.shape[1])]
-        if hasattr(self.encoder, "get_feature_names"):
-            colnames = self.encoder.get_feature_names(self.cols)
-            
-        # Make sure no weird values snuck in; LGBM will complain
         colnames = [re.sub('[^A-Za-z0-9_]+', 'J', x) for x in colnames]
-        #print(colnames)
-        _new_cols = pd.DataFrame(_new_cols, columns=colnames)
+        
+        if isinstance(_new_cols, pd.DataFrame):
+            _new_cols.columns = colnames
+        else:
+            _new_cols = pd.DataFrame(_new_cols, columns=colnames)
+            
         #print(_new_cols.shape)
         #print(_X.head())
         _X = pd.concat([_X.reset_index(drop=True), _new_cols.reset_index(drop=True)], axis=1, ignore_index=False)
@@ -690,6 +763,7 @@ class SteveFeatureDropper(BaseEstimator, TransformerMixin):
                 if self.like in col:
                     self._cols.append(col)
             
+        self._cols = list(set(self._cols))
         return self
     def transform(self, X, y=None):
         _X = X.copy()
@@ -701,14 +775,21 @@ class SteveFeatureDropper(BaseEstimator, TransformerMixin):
     
 class SteveFeatureTyper(BaseEstimator, TransformerMixin):
     # Change all cols to type type
-    def __init__(self, cols=[], typestr=None):
+    def __init__(self, cols=[], like=None, typestr=None):
         self.cols = cols
+        self.like = like
         self.typestr = typestr
     def fit(self, X, y=None):
+        self._cols = self.cols
+        if self.like is not None:
+            for col in X.columns.values:
+                if self.like in col:
+                    self._cols.append(col)
+        self._cols = list(set(self._cols))
         return self
     def transform(self, X, y=None):
         _X = X.copy()
-        _X[self.cols] = _X[self.cols].astype(self.typestr)
+        _X[self._cols] = _X[self._cols].astype(self.typestr)
         return _X
     
 class SteveValueReplacer(BaseEstimator, TransformerMixin):

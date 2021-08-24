@@ -16,27 +16,29 @@ from json.decoder import JSONDecodeError
 import socket
 import datetime
 
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
-from sklearn.impute import SimpleImputer
 from lightgbm import LGBMClassifier
 from xgboost import XGBClassifier
 import xgboost as xgb
 import lightgbm as lgbm
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.experimental import enable_hist_gradient_boosting  # noqa
+from sklearn.ensemble import HistGradientBoostingClassifier
+
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
+from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split
-import category_encoders as ce
-from category_encoders.wrapper import PolynomialWrapper
 from sklearn.metrics import classification_report, f1_score
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import log_loss, accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score, classification_report
 from sklearn.model_selection import StratifiedKFold
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import KBinsDiscretizer
-
-from sklearn.experimental import enable_hist_gradient_boosting  # noqa
-from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.preprocessing import FunctionTransformer
 from sklearn.compose import make_column_selector
+
+import category_encoders as ce
+from category_encoders.wrapper import PolynomialWrapper
 
 from autofeat import AutoFeatRegressor, AutoFeatClassifier, AutoFeatLight
 
@@ -46,23 +48,9 @@ import time
 from functools import partial
 import json
 
-from sklearn.preprocessing import StandardScaler, OneHotEncoder, FunctionTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.compose import ColumnTransformer
-
 from SteveHelpers import dump_json, get_data_types
-from SteveHelpers import SteveCorexWrapper
-from SteveHelpers import SteveNumericNormalizer
-from SteveHelpers import SteveAutoFeatLight
-from SteveHelpers import SteveFeatureDropper
-from SteveHelpers import SteveFeatureTyper
-from SteveHelpers import SteveEncoder
-from SteveHelpers import SteveNumericCapper
-from SteveHelpers import SteveMissingIndicator
-from SteveHelpers import SteveNumericImputer
-from SteveHelpers import SteveCategoryImputer
-from SteveHelpers import SteveCategoryCoalescer
 from SteveHelpers import check_dataframe, check_array
+from SteveHelpers import get_pipeline_steps
 
 def estimate_metrics(X, y, pipe_args, estimator, num_cv=5):
     """
@@ -81,7 +69,6 @@ def estimate_metrics(X, y, pipe_args, estimator, num_cv=5):
     best_iterations = []
     
     print("estimate_metrics: pipe_args: {}".format(pipe_args))
-    print("estimate_metrics: estimator: {}".format(estimator))
           
     skf = StratifiedKFold(n_splits=num_cv, random_state=42, shuffle=True)
 
@@ -101,8 +88,8 @@ def estimate_metrics(X, y, pipe_args, estimator, num_cv=5):
         _X_train = pipe.transform(X_train)
         _X_val  = pipe.transform(X_val)
 
-        check_array(_X_train, "_X_train")
-        check_array(_X_val, "_X_val")
+        check_dataframe(_X_train, "_X_train")
+        check_dataframe(_X_val, "_X_val")
         
         extra_fit_params = {}
         if isinstance (estimator, LGBMClassifier) or isinstance(estimator, XGBClassifier):
@@ -111,8 +98,29 @@ def estimate_metrics(X, y, pipe_args, estimator, num_cv=5):
                 'early_stopping_rounds':20,
                 'verbose': 50,
             })
+        if isinstance (estimator, LGBMClassifier) or isinstance(estimator, HistGradientBoostingClassifier) or isinstance(estimator, XGBClassifier):
+            indices =  [i for i, ix in enumerate(_X_train.columns.values) if "_oenc" in ix]
+            if len(indices) > 0:
+                if isinstance (estimator, LGBMClassifier):
+                    extra_fit_params.update({
+                        'categorical_feature': indices, 
+                    })
+                elif isinstance (estimator, HistGradientBoostingClassifier):
+                    estimator.set_params(**{
+                        'categorical_features': indices, 
+                    })
+                elif isinstance (estimator, XGBClassifier):
+                    # This appears to not be working; xgboost complains.
+                    # Bummber!
+                    #estimator.set_params(**{
+                        #'enable_categorical': True, 
+                    #})
+                    pass
+        print("estimate_metric: extra_fit_params:")
+        print(extra_fit_params)
 
         start = time.time()
+        print("estimate_metrics: estimator: {}".format(estimator))
         print("estimate_metric: fitting...: ")
         estimator.fit(_X_train, y_train, **extra_fit_params)
         train_times.append((time.time() - start))
@@ -160,76 +168,6 @@ def estimate_metrics(X, y, pipe_args, estimator, num_cv=5):
     return metrics
 
 
-def get_pipeline_steps(pipe_args):
-    # Have to create a new pipeline all the time, thanks to a bug in category_encoders:
-    # https://github.com/scikit-learn-contrib/category_encoders/issues/313
-    
-    transformers = []
-    
-    _cat_cols = pipe_args.get('cat_cols_ordinal_encode', [])
-    print(_cat_cols)
-    if len(_cat_cols) > 0:
-        transformers.append(
-            ('cat_enc1', 
-             OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32), 
-             _cat_cols)
-        )
-        
-    _cat_cols = pipe_args.get('cat_cols_target_encode', [])
-    print(_cat_cols)
-    if len(_cat_cols) > 0:
-        
-        from sklearn.preprocessing import FunctionTransformer
-
-        def to_object(x):
-          return pd.DataFrame(x).astype(object)
-
-        fun_tr = FunctionTransformer(to_object)
-        
-        enc =  ce.wrapper.PolynomialWrapper(
-                ce.target_encoder.TargetEncoder(
-                    handle_unknown="value", 
-                    handle_missing="value", 
-                    min_samples_leaf=1, 
-                    smoothing=0.1, return_df=True))
-
-        transformers.append(
-            ('cat_enc2', 
-             Pipeline([
-                 ('cat_enc2_dt', fun_tr),
-                 ('cat_enc2', enc)
-             ]), 
-            _cat_cols))
-    
-    #transformers.append(
-        #('num_capper', SteveNumericCapper(num_cols=['age'], max_val=30)))
-
-    if False and pipe_args.get('autofeat', 0) == 1:
-        transformers.append(
-            ('num_autofeat', 
-             AutoFeatLight(verbose=0, compute_ratio=False, compute_product=True, scale=False), 
-             make_column_selector(dtype_include=np.number))
-        )
-
-    if False and pipe_args.get('normalize', 0) == 1:
-        transformers.append(
-            ('num_scaler', 
-             StandardScaler(),
-             make_column_selector(dtype_include=np.number))
-        )
-        transformers.append(
-            ('num_kbins', 
-            KBinsDiscretizer(n_bins=10, encode='ordinal', strategy='quantile'),
-             make_column_selector(dtype_include=np.number))
-        )
-    
-    steps = [('ct', ColumnTransformer(transformers=transformers,
-                                      remainder = 'passthrough', 
-                                      sparse_threshold=0))]
-    
-    return steps
-
-
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
@@ -263,7 +201,7 @@ def main():
     exp=None
     if args['enable_comet'] == 1:
         exp = Experiment(
-            project_name="eq_searcher",
+            project_name="eq_searcher2",
             workspace="stepthom",
             parse_args=False,
             auto_param_logging=False,
@@ -376,32 +314,34 @@ def main():
                   "max_features": trial.suggest_float("max_features", 0.1, 1.0),
                   "criterion": trial.suggest_categorical("criterion", ['gini', 'entropy']),
                   "class_weight": trial.suggest_categorical("class_weight", ['balanced', None]),
-                  "ccp_alpha": trial.suggest_loguniform("ccp_alpha", 1/1024, 1024),
+                  "ccp_alpha": trial.suggest_loguniform("ccp_alpha", 1/1024, 0.1),
                 
                   "random_state": 77,
                   "n_jobs": 5,
             }
             estimator = RandomForestClassifier(**params)
+            
         elif args['estimator_name'] == "lr":
             params = {
                   "penalty": trial.suggest_categorical("penalty", ['l1', 'l2', 'elasticnet', 'none']),
-                  "C": trial.suggest_loguniform("C", 1/1024, 1024),
+                  "C": trial.suggest_float("C", 0.7, 1.3),
                   "class_weight": trial.suggest_categorical("class_weight", ['balanced', None]),
                   "l1_ratio": trial.suggest_float("l1_ratio", 0.0, 1.0),
                
                   "solver": "saga",
                   "random_state": 77,
                   "n_jobs": 5,
-                  "max_iter": 2000,
+                  "max_iter": 500,
             }
             estimator = LogisticRegression(**params)
+            
         elif args['estimator_name'] == "hist":
             upper = 400
             params = {
-                  "max_iter": trial.suggest_int("max_iter", 4, upper, log=True),
-                  "max_leaf_nodes": trial.suggest_int("max_leaf_nodes", 4, upper*2, log=True),
+                  "max_iter": trial.suggest_int("max_iter", 32, upper, log=True),
+                  "max_leaf_nodes": trial.suggest_int("max_leaf_nodes", 32, upper*2, log=True),
                   "learning_rate": trial.suggest_loguniform("learning_rate", 0.05, 1.0),
-                  "l2_regularization": trial.suggest_loguniform("l2_regularization", 1/1024, 1024),
+                  "l2_regularization": trial.suggest_loguniform("l2_regularization", 1/1024, 0.1),
                
                   "random_state": 77,
             }
