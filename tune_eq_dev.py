@@ -77,7 +77,7 @@ def estimate_metrics(X, y, pipe_args, estimator, num_cv=5):
         cv_step = cv_step + 1
         print("estimate_metrics: cv_step {} of {}".format(cv_step, num_cv))
 
-        X_train, X_val = X.loc[train_index], X.loc[val_index]
+        X_train, X_val = X.loc[train_index].reset_index(drop=True), X.loc[val_index].reset_index(drop=True)
         y_train, y_val = y[train_index], y[val_index]
 
         steps = get_pipeline_steps(pipe_args)
@@ -309,8 +309,8 @@ def main():
         elif args['estimator_name'] == "rf":
             upper = 4096
             params = {
-                  "n_estimators": trial.suggest_int("n_estimators", 4, upper, log=True),
-                  "max_leaf_nodes": trial.suggest_int("max_leaf_nodes", 4, upper, log=True),
+                  "n_estimators": trial.suggest_int("n_estimators", 64, upper, log=True),
+                  "max_leaf_nodes": trial.suggest_int("max_leaf_nodes", 64, upper, log=True),
                   "max_features": trial.suggest_float("max_features", 0.1, 1.0),
                   "criterion": trial.suggest_categorical("criterion", ['gini', 'entropy']),
                   "class_weight": trial.suggest_categorical("class_weight", ['balanced', None]),
