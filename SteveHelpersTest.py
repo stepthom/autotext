@@ -24,19 +24,19 @@ from SteveHelpers import *
 df = pd.DataFrame(data={
     'f0': ['aa', 'aa', 'aa', 'aa', 'aa', 'aa', 'aa', 'zz', 'zz', 'zz', 'zz'],
     'f1': ['a', 'a', 'a', 'a', 'b', 'b', 'b', 'c', 'c', 'd', 'e'],
-    'f2': [1.,   2.,  3.,  4.,  5.,  6.,  7.,  8.,  9., 10., 11.],
+    'f2': [1.,   1.,  3.,  4.,  5.,  6.,  7.,  8.,  9., 10., 11.],
     'f3': ['a', 'a', 'a', np.nan, 'b', 'b', 'b', 'c', 'c', np.nan, 'e'],
-    'f4': [100.,   293.,  322.,  4.,  5.,  6.,  7.,  8.,  9., -10., 11.],
-    'f5': [1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1],
+    'f4': [100.,   100.,  322.,  4.,  5.,  6.,  7.,  8.,  9., -10., 11.],
+    'f5': [1, 1, 2, 1, 0, 0, 1, 1, 0, 1, 1],
     'f6': [0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1],
-    'f7': ['2018-01-01 00:00:00', '2018-02-01 00:00:00', '2018-03-01 00:00:00', '2018-04-01 00:00:00',
+    'f7': ['2018-01-01 00:00:00', '2018-01-01 00:00:00', '2018-03-01 00:00:00', '2018-04-01 00:00:00',
           '2019-01-01 00:00:00', '2019-01-02 00:00:00', '2019-01-10 00:00:00', '2019-01-23 00:00:00',
           '2029-12-12 12:13:14', '2018-01-01 00:00:00', '2018-01-01 00:00:00'],
-    'f8': ['Vancouver', 'Toronto', 'Edmonton', 'York', 'Quebec City', 'Winnipeg', 'Victoria', 'Toronto City Hall', 'Halifax', 'British Columbia', 'St Johns' ],
-    'f9': [49.246292, 43.651070, 53.631611, 43.76153, 46.829853, 49.895077, 48.407326, 43.653908, 44.651070, 53.726669, 47.560539],
-    'f10': [-123.116226, -79.347015, -113.323975, -79.411079, -71.254028,  -97.138451, -123.329773,  -79.384293, -63.582687, -127.647621, -52.712830],
-    'f11': [1.,   np.nan,  3.,  4.,  5.,  6.,  7.,  np.nan,  9., 10., 11.],
-    'f12': ['2017-02-01 00:00:00', '2019-12-11 00:00:00', '2014-03-01 00:00:00', '2010-04-08 00:00:00',
+    'f8': ['Vancouver', 'Vancouver', 'Edmonton', 'York', 'Quebec City', 'Winnipeg', 'Victoria', 'Toronto City Hall', 'Halifax', 'British Columbia', 'St Johns' ],
+    'f9': [49.246292, 49.246292, 53.631611, 43.76153, 46.829853, 49.895077, 48.407326, 43.653908, 44.651070, 53.726669, 47.560539],
+    'f10': [-123.116226, -123.116226, -113.323975, -79.411079, -71.254028,  -97.138451, -123.329773,  -79.384293, -63.582687, -127.647621, -52.712830],
+    'f11': [np.nan,   np.nan,  3.,  4.,  5.,  6.,  7.,  np.nan,  9., 10., 11.],
+    'f12': ['2017-02-01 00:00:00', '2017-02-01 00:00:00', '2014-03-01 00:00:00', '2010-04-08 00:00:00',
           '2019-01-01 00:00:00', '2019-01-02 00:00:00', '2019-01-10 00:00:00', '2019-01-23 00:00:00',
           '2029-12-22 12:13:14', '2012-01-02 00:00:00', '2018-02-01 00:00:00'],
 })
@@ -66,14 +66,32 @@ from sklearn.pipeline import Pipeline
 #prep.fit(df, y)
 #print(prep.transform(df))
 
+
+print("Test check_dataframe")
+check_dataframe(df)
+
+print("Test SteveFeatureTyper on empty")
+prep = SteveFeatureTyper(cols=[], typestr='category')
+prep.fit(df)
+print(prep.transform(df))
+
 print("Test NumericCapper")
 prep = SteveNumericCapper(num_cols=['f2', 'f4'], max_val=6 )
 prep.fit(df)
 print(prep.transform(df))
 
-
 print("Test CategoryImputer")
 prep = SteveCategoryImputer(cat_cols=['f1', 'f3'], )
+prep.fit(df)
+print(prep.transform(df))
+
+print("Test CategoryEncoder")
+prep = SteveEncoder(cols=['f1', 'f8'], encoder=OneHotEncoder(handle_unknown='ignore', sparse=False, dtype=np.int32))
+prep.fit(df)
+print(prep.transform(df))
+
+print("Test CategoryEncoder")
+prep = SteveEncoder(cols=['f1', 'f8'], encoder=OrdinalEncoder(dtype=np.int32))
 prep.fit(df)
 print(prep.transform(df))
 
@@ -131,7 +149,6 @@ print("Test FeatureDropper")
 prep = SteveFeatureDropper(cols=['f2'], like="f1", inverse=True)
 prep.fit(df)
 print(prep.transform(df))
-exit()
 
 print("Test MeansByColValue ")
 prep = SteveMeansByColValue(col_of_interest='f1', num_cols=['f2', 'f4'])
@@ -176,11 +193,11 @@ steps.append(('num_impute', SteveNumericImputer(num_cols, SimpleImputer(missing_
 steps.append(('means', SteveMeansByColValue(col_of_interest='f1', num_cols=['f2', 'f4'])))
 steps.append(('num_normalizer', SteveNumericNormalizer(float_cols, drop_orig=False)))
 steps.append(('num_autfeat', SteveAutoFeatLight(float_cols)))
-steps.append(('cat_impute', SteveCategoryImputer(cat_cols)))
-steps.append(('cat_smush', SteveCategoryCoalescer(keep_top=5, cat_cols=cat_cols)))
-steps.append(('bin_corex', SteveCorexWrapper(bin_cols)))
-steps.append(('date_feats', SteveDateExtractor(date_cols)))
-steps.append(('pca', SteveKernelPCA(float_cols, drop_orig=False, n_components=2)))
+#steps.append(('cat_impute', SteveCategoryImputer(cat_cols)))
+#steps.append(('cat_smush', SteveCategoryCoalescer(keep_top=5, cat_cols=cat_cols)))
+#steps.append(('bin_corex', SteveCorexWrapper(bin_cols)))
+#steps.append(('date_feats', SteveDateExtractor(date_cols)))
+#steps.append(('pca', SteveKernelPCA(float_cols, drop_orig=False, n_components=2)))
 
 prep = Pipeline(steps)
 
