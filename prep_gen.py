@@ -158,7 +158,7 @@ def earthquake_level_3_agg_func(df, train=False):
     if train and not hasattr(earthquake_level_3_agg_func, "level_3_counts"):
         earthquake_level_3_agg_func.level_3_counts = df.groupby('geo_level_3_id').agg({'geo_level_3_id': 'count'})
     
-    def f(row, level_3_counts, min_num=10):
+    def f(row, level_3_counts, min_num=25):
         geo_level_2_id = row['geo_level_2_id']
         geo_level_3_id = row['geo_level_3_id']
         if geo_level_3_id not in level_3_counts.index or level_3_counts.loc[geo_level_3_id][0] < min_num:
@@ -273,9 +273,9 @@ def hack(X, y=None,
     ##################################################
 
     if num_imputer is not None:
+        simple_impute_cols = num_cols
         print("DEBUG: hack: simple numeric imputing")
         msgs.append('Numeric simple imputing for cols: {}'.format(simple_impute_cols))
-        simple_impute_cols = num_cols
         if train:
             num_imputer = num_imputer.fit(df[simple_impute_cols], y)
         df[simple_impute_cols] = num_imputer.transform(df[simple_impute_cols])
@@ -553,12 +553,17 @@ def main():
         custom_begin_funcss = [[pump_datatype_func, pump_weirdvals_func]]
         custom_end_funcss = [[pump_date_func, pump_latlong_func, pump_regionmeans_func]]
         keep_tops = [100, 200, 300]
-        dimreducs = [
-            #KernelPCA(n_components=15, kernel='rbf', n_jobs=10, eigen_solver="arpack", max_iter=500),
-            #KernelPCA(n_components=5, kernel='poly', n_jobs=10, eigen_solver="arpack", max_iter=500),
-            #KernelPCA(n_components=5, kernel='sigmoid', n_jobs=10, eigen_solver='arpack', max_iter=500),
-            None,
-            #TruncatedSVD(n_components=20, n_iter=5, random_state=42),
+        dimreducs = [ None,  ]
+        autofeats = [ None, ]
+        feature_selectors = [ None,  ]
+        cat_encoders = [ None, ]
+        num_imputers = [
+           SimpleImputer(missing_values=np.nan, strategy="median"),
+           #IterativeImputer(missing_values=np.nan, estimator=ExtraTreesRegressor(n_estimators=100, random_state=0)),
+        ]
+        num_indicators = [
+           MissingIndicator(features="all"),
+           #None,
         ]
         
     elif args.competition.startswith("h"):
@@ -567,12 +572,34 @@ def main():
         data_dir = "h1n1/data"
         target_col = "h1n1_vaccine"
         id_col = "respondent_id"
+        
+        num_imputers = [None, ]
+        num_indicators = [ None, ]
+        keep_tops = [None]
+        dimreducs = [ None,  ]
+        autofeats = [ None, ]
+        feature_selectors = [ None,  ]
+        cat_encoders = [ None, ]
+        num_imputers = [ SimpleImputer(missing_values=np.nan, strategy="median"), ]
+        num_indicators = [ MissingIndicator(features="all"), ]
     elif args.competition.startswith("s"):
         train_input = "seasonal/vaccine_seasonal_train.csv"
         test_input = "seasonal/vaccine_seasonal_test.csv"
         data_dir = "seasonal/data"
         target_col = "seasonal_vaccine"
         id_col = "respondent_id"
+        
+        num_imputers = [None, ]
+        num_indicators = [ None, ]
+        keep_tops = [None]
+        dimreducs = [ None,  ]
+        autofeats = [ None, ]
+        feature_selectors = [ None,  ]
+        cat_encoders = [ None, ]
+        num_imputers = [ SimpleImputer(missing_values=np.nan, strategy="median"), ]
+        num_indicators = [ MissingIndicator(features="all"), ]
+        
+        
     elif args.competition.startswith("e"):
         train_input = "earthquake/earthquake_train.csv"
         test_input = "earthquake/earthquake_test.csv"
@@ -584,7 +611,7 @@ def main():
         
         custom_begin_funcss = [
             [earthquake_level_3_agg_func, earthquake_datatype_123_func], 
-            [earthquake_datatype_12_func],
+            #[earthquake_datatype_12_func],
         ]
         
         num_imputers = [None, ]

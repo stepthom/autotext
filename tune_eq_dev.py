@@ -65,14 +65,14 @@ def main():
     
     # Prep/FE params
     parser.add_argument('--sample-frac', type=float, default=1.0)
-    parser.add_argument('--pipe-args-file', type=str, default='earthquake/pipe_args_01.json')
+    parser.add_argument('--pipe-args-file', type=str, default='earthquake/pipe_args_07.json')
     
     parser.add_argument('--estimator-name', type=str, default="lgbm")
     parser.add_argument('--num-cv', type=int, default=12)
     
     # Optuna params
     parser.add_argument('--sampler', type=str, default='tpe')
-    parser.add_argument('--n-trials', type=int, default=3)
+    parser.add_argument('--n-trials', type=int, default=500)
 
     args = parser.parse_args()
     args = vars(args)
@@ -262,8 +262,22 @@ def main():
     elif args['sampler'] == "random":
         sampler = optuna.samplers.RandomSampler()
 
-    study = optuna.create_study(study_name=runname, sampler=sampler, direction="maximize")
-
+    #study = optuna.create_study(study_name=runname, sampler=sampler, direction="maximize")
+    if True:
+        study = optuna.create_study(
+            study_name="lgbm_07", 
+            #storage="postgresql://utkborfs:BR5DVp6qD9-Pe-JkkXKmayoWUB74fmdh@chunee.db.elephantsql.com/utkborfs",
+            storage="sqlite:///eq_studies.db",
+            sampler=sampler, 
+            direction="maximize",
+            load_if_exists = True,
+        )
+    else: 
+        study = optuna.load_study(
+            study_name="lgbm_07", 
+            storage="postgresql://utkborfs:BR5DVp6qD9-Pe-JkkXKmayoWUB74fmdh@chunee.db.elephantsql.com/utkborfs",
+         )
+    
     study.optimize(lambda trial: objective(trial, X, y, args, pipe_args, exp, runname),
                     n_trials=args['n_trials'], 
                     gc_after_trial=True)
