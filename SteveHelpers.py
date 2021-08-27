@@ -6,8 +6,12 @@ import os
 import sys
 import re
 
+import time
+
 import json
 import datetime
+
+import scipy.stats
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from pandas.api.types import is_numeric_dtype
@@ -32,75 +36,228 @@ from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import FunctionTransformer
 from sklearn.compose import make_column_selector
+from sklearn.preprocessing import LabelEncoder
+
+from sklearn.metrics import f1_score, roc_auc_score, accuracy_score, classification_report
+
+from lightgbm import LGBMClassifier
+from xgboost import XGBClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.experimental import enable_hist_gradient_boosting  # noqa
+from sklearn.ensemble import HistGradientBoostingClassifier
 
 import geopy.distance
 
-def get_pipeline_steps(pipe_args):
-    # Have to create a new pipeline all the time, thanks to a bug in category_encoders:
-    # https://github.com/scikit-learn-contrib/category_encoders/issues/313
+class Project:
+    def __init__(self, id_col, target_col, out_dir, train_fn, test_fn, objective, num_class, metric, sample_frac=1.0):
+        
+        self.id_col = id_col
+        self.target_col = target_col
+        self.out_dir = out_dir
+        self.train_fn = train_fn
+        self.test_fn = test_fn
+        self.train_df = pd.read_csv(self.train_fn)
+        self.test_df = pd.read_csv(self.test_fn)
+        if sample_frac< 1.0:
+            self.train_df  = self.train_df.sample(frac=sample_frac, random_state=3).reset_index(drop=True)
+
+        self.X = self.train_df.drop([self.id_col, self.target_col], axis=1)
+        self.X_test = self.test_df.drop([self.id_col], axis=1)
+        self.y = self.train_df[self.target_col]
+        self.label_transformer = LabelEncoder()
+        self.y = self.label_transformer.fit_transform(self.y)
+        self.objective = objective
+        self.num_class = num_class
+        self.metric = metric
+
+
+
+def run_one(X, y, pipe_args, pipe_step_func, estimator):
+    """
+    X, y: features and target
+    pipe_args: args to control FE pipeline
+    estimator: the estmator
     
-    steps = []
+    Returns metrics, such as:
+    val_scores: estimated val score for each each CV fold
+    train_scores: estimated val score for each each CV fold
+    """
     
-    _drop_cols = pipe_args.get('drop_cols', [])
-    if len(_drop_cols) > 0:
-        steps.append(('ddropper', SteveFeatureDropper(_drop_cols)))
+    print("run_one: pipe_args: {}".format(pipe_args))
+          
+    steps = pipe_step_func(pipe_args)
+    pipe = Pipeline(steps)
 
-    _cat_cols = pipe_args.get('cat_cols_ordinal_encode', [])
-    if len(_cat_cols) > 0:
-        steps.append(
-            ('cat_encoder', 
-             SteveEncoder(
-                 cols=_cat_cols,
-                 encoder=OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
-                 suffix="_oenc"
-             )))
-        steps.append(('odropper', SteveFeatureDropper(_cat_cols)))
-       
-        #steps.append(('otyper', SteveFeatureTyper(like="_oenc", typestr='category')))
+    pipe.fit(X, y)
+    _X = pipe.transform(X)
+    check_dataframe(_X, "_X")
         
+    extra_fit_params = {}
+    if isinstance (estimator, LGBMClassifier) or isinstance(estimator, HistGradientBoostingClassifier) or isinstance(estimator, XGBClassifier):
+        indices =  [i for i, ix in enumerate(_X.columns.values) if "_oenc" in ix]
+        if len(indices) > 0:
+            if isinstance (estimator, LGBMClassifier):
+                extra_fit_params.update({
+                    'categorical_feature': indices, 
+                })
+            elif isinstance (estimator, HistGradientBoostingClassifier):
+                estimator.set_params(**{
+                    'categorical_features': indices, 
+                })
+    print("run_one: extra_fit_params:")
+    print(extra_fit_params)
+
+    start = time.time()
+    print("run_one: estimator: {}".format(estimator))
+    print("run_one: fitting...: ")
+    estimator.fit(_X, y, **extra_fit_params)
+    duration = (time.time() - start)
+    print("run_one: done. Time {}".format(duration))
+    
+    return pipe, estimator
+
+
+def estimate_metrics(X, y, pipe_args, pipe_steps_func, estimator, num_cv=5, early_stop=True, project=None):
+    """
+    X, y: features and target
+    pipe_args: args to control FE pipeline
+    estimator: the estmator
+    use early stopping (for lgbm and xgboost)?
+    
+    Returns metrics, such as:
+    val_scores: estimated val score for each each CV fold
+    train_scores: estimated val score for each each CV fold
+    """
+    metrics = {}
+    val_scores = []
+    train_scores = []
+    train_times = []
+    best_iterations = []
+    
+    print("estimate_metrics: pipe_args: {}".format(pipe_args))
+          
+    skf = StratifiedKFold(n_splits=num_cv, random_state=42, shuffle=True)
+
+    cv_step = -1
+    for train_index, val_index in skf.split(X, y):
+        cv_step = cv_step + 1
+        print("========================================")
+        print("estimate_metrics: cv_step {} of {}".format(cv_step, num_cv))
+
+        X_train, X_val = X.loc[train_index].reset_index(drop=True), X.loc[val_index].reset_index(drop=True)
+        y_train, y_val = y[train_index], y[val_index]
+
+        steps = pipe_steps_func(pipe_args)
+        pipe = Pipeline(steps)
+
+        pipe.fit(X_train, y_train)
+
+        _X_train = pipe.transform(X_train)
+        _X_val  = pipe.transform(X_val)
+
+        #check_dataframe(_X_train, "_X_train", full=False)
+        #check_dataframe(_X_val, "_X_val", full=False)
         
-    _cat_cols = pipe_args.get('cat_cols_onehot_encode', [])
-    if len(_cat_cols) > 0:
-        steps.append(
-            ('cat_enc1', 
-             SteveEncoder(
-                 cols=_cat_cols,
-                 encoder=OneHotEncoder(handle_unknown='ignore', sparse=False, dtype=np.int32),
-                 suffix="_oheenc")
-            ))
-        steps.append(('phedropper', SteveFeatureDropper(_cat_cols)))
-        
-    _cat_cols = pipe_args.get('cat_cols_target_encode', [])
-    if len(_cat_cols) > 0:
-        steps.append(('typer', SteveFeatureTyper(cols=_cat_cols, typestr='category')))
-        enc =  ce.wrapper.PolynomialWrapper(
-                ce.target_encoder.TargetEncoder(
-                    handle_unknown="value", 
-                    handle_missing="value", 
-                    min_samples_leaf=1, 
-                    smoothing=0.1, return_df=True))
+        extra_fit_params = {}
+        if early_stop and isinstance (estimator, LGBMClassifier) or isinstance(estimator, XGBClassifier):
+            extra_fit_params.update({
+                'eval_set': [(_X_val, y_val)],
+                'early_stopping_rounds': 50,
+                'verbose': 200,
+            })
+        if isinstance (estimator, LGBMClassifier) or isinstance(estimator, HistGradientBoostingClassifier) or isinstance(estimator, XGBClassifier):
+            indices =  [i for i, ix in enumerate(_X_train.columns.values) if "_oenc" in ix]
+            if len(indices) > 0:
+                print("estimate_metric: categorical indices: {}".format(indices))
+                if isinstance (estimator, LGBMClassifier):
+                    extra_fit_params.update({
+                        'categorical_feature': indices, 
+                    })
+                elif isinstance (estimator, HistGradientBoostingClassifier):
+                    estimator.set_params(**{
+                        'categorical_features': indices, 
+                    })
+                elif isinstance (estimator, XGBClassifier):
+                    # This appears to not be working; xgboost complains.
+                    # Bummber!
+                    #estimator.set_params(**{
+                        #'enable_categorical': True, 
+                    #})
+                    pass
 
-        steps.append(
-            ('cat_enc2', 
-             SteveEncoder( cols=_cat_cols, encoder=enc, suffix="_tenc"
-             )))
-        
-        steps.append(('tdropper', SteveFeatureDropper(_cat_cols)))
+        start = time.time()
+        print("estimate_metrics: estimator: {}".format(estimator))
+        print("estimate_metric: fitting...: ")
+        estimator.fit(_X_train, y_train, **extra_fit_params)
+        train_times.append((time.time() - start))
 
-    steps.append(('num_capper', SteveNumericCapper(num_cols=['age'], max_val=30)))
+        print("estimate_metric: calc Val metrics. ")
+        y_val_pred_proba = estimator.predict_proba(_X_val)
+        y_val_pred = estimator.predict(_X_val)
+        print(project.metric)
+        if project.metric == "f1":
+            val_score =  f1_score(y_val, y_val_pred, average="micro")
+        elif project.metric == "roc_auc":
+            print('calculating roc_auc')
+            val_score =  roc_auc_score(y_val, y_val_pred, average="macro")
+                
+        val_scores.append(val_score)
+        print("val_score = {}".format(val_score))
+        print(classification_report(y_val, y_val_pred, digits=4))
 
-    _float_cols = pipe_args.get('float_cols', [])
-    if len(_float_cols) > 0 and pipe_args.get('autofeat', 0) == 1:
-        steps.append(('num_autofeat', SteveAutoFeatLight(_float_cols, compute_ratio=True, compute_product=True, scale=True)))
+        print("estimate_metric: calc Train metrics. ")
+        #y_train_pred_proba = estimator.predict_proba(_X_train)
+        y_train_pred = estimator.predict(_X_train)
+        if project.metric == "f1":
+            train_score =  f1_score(y_train, y_train_pred, average="micro")
+        elif project.metric == "roc_auc":
+            train_score =  roc_auc_score(y_train, y_train_pred, average="macro")
+        train_scores.append(train_score)
+        #print(classification_report(y_train, y_train_pred, digits=4))
 
-    if len(_float_cols) > 0 and pipe_args.get('normalize', 0) == 1:
-        steps.append(('num_normalizer', SteveNumericNormalizer(_float_cols, drop_orig=True)))
-        
-    print('get_pipeline steps:')
-    for step in steps:
-        print(step)
-    return steps
+        bi = None
+        if hasattr(estimator, 'best_iteration_'):
+            bi = estimator.best_iteration_
+        elif hasattr(estimator, 'best_iteration'):
+            bi = estimator.best_iteration
+        if bi is not None:
+            best_iterations.append(bi)
+          
+    def mean_confidence_interval(data, confidence=0.95):
+        a = 1.0 * np.array(data)
+        n = len(a)
+        m, se = np.mean(a), scipy.stats.sem(a)
+        h = se * scipy.stats.t.ppf((1 + confidence) / 2., n-1)
+        return m, m-h, m+h
 
+    metrics['val_scores'] = val_scores
+    metrics['val_scores_range'] = mean_confidence_interval(val_scores)
+    metrics['train_scores'] = train_scores
+    bir = []
+    if len(best_iterations) > 0:
+        bir = mean_confidence_interval(best_iterations)
+    metrics['best_iterations'] = best_iterations
+    metrics['best_iterations_range'] = bir
+    metrics['train_times'] = train_times
+    
+    print("estimate_metrics: cv complete.")
+    print("estimate_metrics: metrics:")
+    print(metrics)
+          
+    return metrics
+    
+
+
+def read_json(fn):
+    run = {}
+    with open(fn) as f:
+        try:
+            run = json.load(f)
+        except JSONDecodeError as e:
+            print("ERROR: cannot parse json file {}".format(fn))
+            print(e)
+    return run
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -138,9 +295,11 @@ def check_dataframe(df, name="df", full=True):
     print("{} shape: {}".format(name, df.shape))
     if full:
         print("columns: {}".format(list(df.columns)))
+        #print(df.info())
+        #print(df.head())
      
-    has_a_inf = np.isinf(df).any().any()
-    print("Any inf?: {}".format(has_a_inf))
+    #has_a_inf = np.isinf(df).any().any()
+    #print("Any inf?: {}".format(has_a_inf))
     has_a_nan = df.isnull().any().any()
     print("Any nan?: {}".format(has_a_nan))
     if has_a_nan:
@@ -498,7 +657,7 @@ class SteveEncoder(BaseEstimator, TransformerMixin):
         self.suffix = suffix
         
     def fit(self, X, y=None):
-        #print('SteveEncoder')
+        print('SteveEncoder')
         #print(self.cols)
         #print(self.encoder)
         #print(type(X))
@@ -508,7 +667,7 @@ class SteveEncoder(BaseEstimator, TransformerMixin):
 
     def transform(self, X, y=None):
         _X = X.copy()
-        #print('steve encoder')
+        print('steve encoder:trans')
         #print(_X.shape)
         #print(_X.columns)
         
@@ -537,6 +696,7 @@ class SteveNumericImputer(BaseEstimator, TransformerMixin):
         self.imputer = imputer
         
     def fit(self, X, y=None):
+        print('SteveNumericImputer')
         self.imputer.fit(X[self.num_cols], y)
         return self
 
@@ -649,6 +809,7 @@ class SteveMissingIndicator(BaseEstimator, TransformerMixin):
         self.num_cols = num_cols
         self.num_indicator = MissingIndicator(features="all")
     def fit(self, X, y=None):
+        print('SteveMissingIndicator:fit')
         self.num_indicator.fit(X[self.num_cols], y)
         return self
     def transform(self, X, y=None):
@@ -780,6 +941,7 @@ class SteveFeatureTyper(BaseEstimator, TransformerMixin):
         self.like = like
         self.typestr = typestr
     def fit(self, X, y=None):
+        print("SteveFeatureTyper:fit")
         self._cols = self.cols
         if self.like is not None:
             for col in X.columns.values:
@@ -788,6 +950,7 @@ class SteveFeatureTyper(BaseEstimator, TransformerMixin):
         self._cols = list(set(self._cols))
         return self
     def transform(self, X, y=None):
+        print("SteveFeatureTyper:transform")
         _X = X.copy()
         _X[self._cols] = _X[self._cols].astype(self.typestr)
         return _X

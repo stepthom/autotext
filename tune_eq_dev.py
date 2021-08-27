@@ -8,60 +8,30 @@ import argparse
 import numpy as np
 import pandas as pd
 import os
-import sys
-
-import scipy.stats
-import json
-from json.decoder import JSONDecodeError
-import socket
-import datetime
 
 from lightgbm import LGBMClassifier
 from xgboost import XGBClassifier
-import xgboost as xgb
-import lightgbm as lgbm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.experimental import enable_hist_gradient_boosting  # noqa
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
-from sklearn.impute import SimpleImputer
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, f1_score
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import log_loss, accuracy_score, balanced_accuracy_score, f1_score, roc_auc_score, classification_report
-from sklearn.model_selection import StratifiedKFold
-from sklearn.preprocessing import KBinsDiscretizer
-from sklearn.preprocessing import FunctionTransformer
-from sklearn.compose import make_column_selector
-
-import category_encoders as ce
-from category_encoders.wrapper import PolynomialWrapper
-
-from autofeat import AutoFeatRegressor, AutoFeatClassifier, AutoFeatLight
 
 import optuna
-import time
 
-from functools import partial
-import json
-
-from SteveHelpers import dump_json, get_data_types
+from SteveHelpers import dump_json, get_data_types, read_json
 from SteveHelpers import check_dataframe, check_array
-from EQHelpers import get_pipeline_steps, estimate_metrics
-
+from SteveHelpers import estimate_metrics
 
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
-    parser.add_argument('--id-col', type=str, default="building_id")
-    parser.add_argument('--target-col', type=str, default="damage_grade")
-    parser.add_argument('--out-dir', type=str, default="earthquake/out")
+    parser.add_argument('--project', type=str, default="eq")
     
     # Comet params
     parser.add_argument('--enable-comet', type=int, default=1)
+    parser.add_argument('--comet-project-name', type=str, default="eq_searcher2")
     
     # Prep/FE params
     parser.add_argument('--sample-frac', type=float, default=1.0)
@@ -71,7 +41,7 @@ def main():
     parser.add_argument('--num-cv', type=int, default=12)
     
     # Optuna params
-    parser.add_argument('--sampler', type=str, default='tpe')
+    parser.add_argument('--optuna-study-name', type=str, default='eq_lgbm_07')
     parser.add_argument('--n-trials', type=int, default=500)
 
     args = parser.parse_args()
@@ -79,42 +49,24 @@ def main():
 
     print("Command line arguments:")
     print(args)
-
-    data_id = '000'
+    
+    if args['project'] == "eq":
+        from EQHelpers import run_one, get_project, get_pipeline_steps
+    elif args['project'] == "h1n1":
+        from H1N1Helpers import run_one, get_project, get_pipeline_steps
+        
+    p = get_project(args['sample_frac'])
+    
+    pipe_args = read_json(args["pipe_args_file"])
 
     # Create an experiment with your api key
     exp=None
     if args['enable_comet'] == 1:
         exp = Experiment(
-            project_name="eq_searcher2",
+            project_name=args['comet_project_name'],
             workspace="stepthom",
-            parse_args=False,
-            auto_param_logging=False,
-            auto_metric_logging=False,
-            log_graph=False
+            parse_args=False, auto_param_logging=False, auto_metric_logging=False, log_graph=False
         )
-
-    train_fn = 'earthquake/earthquake_train.csv'
-    test_fn = 'earthquake/earthquake_test.csv'
-    train_df = pd.read_csv(train_fn)
-    test_df = pd.read_csv(test_fn)
-    if args['sample_frac']< 1.0:
-        train_df  = train_df.sample(frac=args['sample_frac'], random_state=3).reset_index(drop=True)
-        
-    X = train_df.drop([args['id_col'], args['target_col']], axis=1)
-    y = train_df[args['target_col']]
-    X_test = test_df.drop([args['id_col']], axis=1)
-    
-    label_transformer = LabelEncoder()
-    y = label_transformer.fit_transform(y)
-                 
-    pipe_args = {}
-    with open(args["pipe_args_file"]) as f:
-        try:
-            pipe_args = json.load(f)
-        except JSONDecodeError as e:
-            print("ERROR: cannot parse json file {}".format(args.pipe_arg_file))
-            print(e)
 
     runname = ""
     if exp:
@@ -123,28 +75,30 @@ def main():
         runname = str(uuid.uuid4())
     print("tune_eq: Run name: {}".format(runname))
 
-    starttime = datetime.datetime.now()
-    
     if exp is not None:
-        exp.log_other('train_fn', train_fn)
-        exp.log_other('test_fn', test_fn)
-        exp.log_table('X_head.csv', X.head())
+        exp.log_other('train_fn', p.train_fn)
+        exp.log_other('test_fn', p.test_fn)
+        exp.log_table('X_head.csv', p.X.head())
         exp.log_parameters(args)
         exp.log_parameters(pipe_args)
         exp.log_asset('SteveHelpers.py')
+        exp.log_asset('EQHelpers.py')
 
         
-    def objective(trial, X, y, args, pipe_args, exp, runname):
+    def objective(trial, X, y, args, pipe_args, exp, runname, project):
         params = {}
         estimator = None
 
         if args['estimator_name'] == "lgbm":
             upper = 4096
             params = {
+                
+                  "max_bin": trial.suggest_int("max_bin", 32, 512),
+                  
                   "num_leaves": trial.suggest_int("num_leaves", 4, upper, log=True),
                   "min_child_weight": trial.suggest_loguniform("min_child_weight", 0.001, 128),
                   "min_child_samples": trial.suggest_int("min_child_samples", 2, 2**7, log=True),
-                  "learning_rate": trial.suggest_loguniform("learning_rate", 1/1024, 1.0),
+                  "learning_rate": trial.suggest_loguniform("learning_rate", 1/256, 2.0),
                   "feature_fraction_bynode":  trial.suggest_float("feature_fraction_bynode", 0.01, 1.0),
                   "colsample_bytree": trial.suggest_float("colsample_bytree", 0.01, 1.0),
                   "subsample": 1.0,
@@ -153,13 +107,13 @@ def main():
                   "reg_lambda": trial.suggest_loguniform("reg_lambda", 1/1024, 1024),
                   "extra_trees": trial.suggest_categorical("extra_trees", [True, False]),
 
-                  "n_estimators": 3500,
+                  "n_estimators": 10000,
                   "boosting_type": 'gbdt',
                   "max_depth": -1,
                   "n_jobs": 5,
-                  "objective": "multiclass",
+                  #"objective": project.objective,
+                  #"num_class": project.num_class,
                   "verbosity": -1,
-                  "num_class": 3,
                   "seed": 77,
             }
 
@@ -184,10 +138,11 @@ def main():
                   "grow_policy": "lossguide",
                   "tree_method": "hist",
                   "n_jobs": 5,
-                  "objective": "multi:softprob",
+                  #"objective": "multi:softproj" if project.objective == "multiclass" else "binary",
                   "eval_metric": "mlogloss",
                   "verbosity": 1,
-                  "num_class": 3,
+                  #"num_class": 3,
+                  "num_class": project.num_class,
                   "seed": 77,
             }
             estimator = XGBClassifier(**params)
@@ -234,7 +189,7 @@ def main():
         else:
             print("Unknown estimator name {}".format(estimator_name))
 
-        metrics = estimate_metrics(X, y, pipe_args, estimator, args['num_cv'])
+        metrics = estimate_metrics(p.X, p.y, pipe_args, get_pipeline_steps, estimator, args['num_cv'], early_stop=True, project=p)
 
         if exp is not None:
             exp.log_metric("mean_val_score", np.mean(metrics['val_scores']), step=trial.number)
@@ -249,47 +204,26 @@ def main():
         res['pipe_args'] = pipe_args
         res['params'] = params
         res['metrics'] = metrics
-        json_fn = os.path.join(args['out_dir'], "{}-trial-{}.json".format(runname, trial.number))
+        json_fn = os.path.join(p.out_dir, "{}-trial-{}.json".format(runname, trial.number))
         dump_json(json_fn, res)
 
         return np.mean(metrics['val_scores'])
-       
-    sampler = None
-    if args['sampler'] == "tpe":
-        sampler = optuna.samplers.TPESampler()
-    elif args['sampler'] == "motpe":
-        sampler = optuna.samplers.MOTPESampler()
-    elif args['sampler'] == "random":
-        sampler = optuna.samplers.RandomSampler()
-
-    #study = optuna.create_study(study_name=runname, sampler=sampler, direction="maximize")
-    if True:
-        study = optuna.create_study(
-            study_name="lgbm_07", 
-            #storage="postgresql://utkborfs:BR5DVp6qD9-Pe-JkkXKmayoWUB74fmdh@chunee.db.elephantsql.com/utkborfs",
-            storage="sqlite:///eq_studies.db",
-            sampler=sampler, 
-            direction="maximize",
-            load_if_exists = True,
-        )
-    else: 
-        study = optuna.load_study(
-            study_name="lgbm_07", 
-            storage="postgresql://utkborfs:BR5DVp6qD9-Pe-JkkXKmayoWUB74fmdh@chunee.db.elephantsql.com/utkborfs",
-         )
     
-    study.optimize(lambda trial: objective(trial, X, y, args, pipe_args, exp, runname),
+    study = optuna.create_study(
+        study_name=args['optuna_study_name'],
+        storage="sqlite:///eq_studies.db",
+        sampler= optuna.samplers.TPESampler(
+            n_startup_trials = 100,
+            n_ei_candidates = 10,
+            constant_liar=True,
+        ),
+        direction="maximize",
+        load_if_exists = True,
+    )
+    
+    study.optimize(lambda trial: objective(trial, p.X, p.y, args, pipe_args, exp, runname, p),
                     n_trials=args['n_trials'], 
                     gc_after_trial=True)
-
-    print(study.best_params)
-    print(study.best_value)
-    print(study.best_trial)
-    print(study.trials_dataframe())
-    if exp is not None:
-        exp.log_table('optuna_trials.csv', study.trials_dataframe())
-        exp.log_figure('Opt history', optuna.visualization.plot_optimization_history(study))
-        exp.log_figure('Hyperparam importance', optuna.visualization.plot_param_importances(study))
 
     return
     
