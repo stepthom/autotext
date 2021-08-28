@@ -195,6 +195,10 @@ def main():
             exp.log_metric("mean_val_score", np.mean(metrics['val_scores']), step=trial.number)
             exp.log_metric("mean_train_score", np.mean(metrics['train_scores']), step=trial.number)
             exp.log_text(params, step=trial.number)
+            
+        trial.set_user_attr("metrics", metrics)
+        trial.set_user_attr("args", args)
+        trial.set_user_attr("pipe_args", pipe_args)
 
         # Log for later
         res = {}
@@ -211,7 +215,8 @@ def main():
     
     study = optuna.create_study(
         study_name=args['optuna_study_name'],
-        storage="sqlite:///eq_studies.db",
+        #storage="sqlite:///eq_studies.db",
+        storage="postgresql://hpc3552@172.20.13.14/hpc3552",
         sampler= optuna.samplers.TPESampler(
             n_startup_trials = 100,
             n_ei_candidates = 10,
@@ -220,6 +225,7 @@ def main():
         direction="maximize",
         load_if_exists = True,
     )
+    #study._storage = study._storage._backend
     
     study.optimize(lambda trial: objective(trial, p.X, p.y, args, pipe_args, exp, runname, p),
                     n_trials=args['n_trials'], 
