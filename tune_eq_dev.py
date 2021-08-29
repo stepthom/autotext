@@ -2,7 +2,6 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 # import comet_ml at the top of your file
-from comet_ml import Experiment
 import uuid
 import argparse
 import numpy as np
@@ -23,73 +22,33 @@ import optuna
 from SteveHelpers import dump_json, get_data_types, read_json
 from SteveHelpers import check_dataframe, check_array
 from SteveHelpers import estimate_metrics
+from SteveHelpers import get_pipeline_steps
+from SteveHelpers import StudyData
 
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    
-    parser.add_argument('--project', type=str, default="eq")
-    
-    # Comet params
-    parser.add_argument('--enable-comet', type=int, default=1)
-    parser.add_argument('--comet-project-name', type=str, default="eq_searcher2")
-    
-    # Prep/FE params
+    parser.add_argument('--study-name', type=str, default='h1n1')
     parser.add_argument('--sample-frac', type=float, default=1.0)
-    parser.add_argument('--pipe-args-file', type=str, default='earthquake/pipe_args_07.json')
-    
-    parser.add_argument('--estimator-name', type=str, default="lgbm")
     parser.add_argument('--num-cv', type=int, default=12)
     
     # Optuna params
-    parser.add_argument('--optuna-study-name', type=str, default='eq_lgbm_07')
     parser.add_argument('--n-trials', type=int, default=500)
 
     args = parser.parse_args()
     args = vars(args)
-
+    
     print("Command line arguments:")
     print(args)
-    
-    if args['project'] == "eq":
-        from EQHelpers import run_one, get_project, get_pipeline_steps
-    elif args['project'] == "h1n1":
-        from H1N1Helpers import run_one, get_project, get_pipeline_steps
         
-    p = get_project(args['sample_frac'])
+    def objective(trial, study_name, project):
+        estimator_name = trial.suggest_categorical("estimator_name", ["lgbm", "xgboost"])
+        pipe_args = study.user_attrs['pipe_args']
+        pipe_args_name = trial.suggest_categorical("pipe_args_name", pipe_args.keys())
+        pipe_args = pipe_args[pipe_args_name]
     
-    pipe_args = read_json(args["pipe_args_file"])
-
-    # Create an experiment with your api key
-    exp=None
-    if args['enable_comet'] == 1:
-        exp = Experiment(
-            project_name=args['comet_project_name'],
-            workspace="stepthom",
-            parse_args=False, auto_param_logging=False, auto_metric_logging=False, log_graph=False
-        )
-
-    runname = ""
-    if exp:
-        runname = exp.get_key()
-    else:
-        runname = str(uuid.uuid4())
-    print("tune_eq: Run name: {}".format(runname))
-
-    if exp is not None:
-        exp.log_other('train_fn', p.train_fn)
-        exp.log_other('test_fn', p.test_fn)
-        exp.log_table('X_head.csv', p.X.head())
-        exp.log_parameters(args)
-        exp.log_parameters(pipe_args)
-        exp.log_asset('SteveHelpers.py')
-        exp.log_asset('EQHelpers.py')
-
-        
-    def objective(trial, X, y, args, pipe_args, exp, runname, project):
-        params = {}
         estimator = None
-
-        if args['estimator_name'] == "lgbm":
+        params = {}
+        if estimator_name == "lgbm":
             upper = 4096
             params = {
                 
@@ -116,10 +75,9 @@ def main():
                   "verbosity": -1,
                   "seed": 77,
             }
-
             estimator = LGBMClassifier(**params)
             
-        elif args['estimator_name'] == "xgboost":
+        elif estimator_name == "xgboost":
             upper = 4096
             params = {
                   "max_leaves": trial.suggest_int("max_leaves", 4, upper, log=True),
@@ -139,14 +97,15 @@ def main():
                   "tree_method": "hist",
                   "n_jobs": 5,
                   #"objective": "multi:softproj" if project.objective == "multiclass" else "binary",
-                  "eval_metric": "mlogloss",
+                  #"eval_metric": "mlogloss",
                   "verbosity": 1,
                   #"num_class": 3,
-                  "num_class": project.num_class,
+                  #"num_class": project.num_class,
                   "seed": 77,
             }
             estimator = XGBClassifier(**params)
-        elif args['estimator_name'] == "rf":
+            
+        elif estimator_name == "rf":
             upper = 4096
             params = {
                   "n_estimators": trial.suggest_int("n_estimators", 64, upper, log=True),
@@ -161,7 +120,7 @@ def main():
             }
             estimator = RandomForestClassifier(**params)
             
-        elif args['estimator_name'] == "lr":
+        elif estimator_name == "lr":
             params = {
                   "penalty": trial.suggest_categorical("penalty", ['l1', 'l2', 'elasticnet', 'none']),
                   "C": trial.suggest_float("C", 0.7, 1.3),
@@ -175,7 +134,7 @@ def main():
             }
             estimator = LogisticRegression(**params)
             
-        elif args['estimator_name'] == "hist":
+        elif estimator_name == "hist":
             upper = 400
             params = {
                   "max_iter": trial.suggest_int("max_iter", 32, upper, log=True),
@@ -189,45 +148,25 @@ def main():
         else:
             print("Unknown estimator name {}".format(estimator_name))
 
-        metrics = estimate_metrics(p.X, p.y, pipe_args, get_pipeline_steps, estimator, args['num_cv'], early_stop=True, project=p)
-
-        if exp is not None:
-            exp.log_metric("mean_val_score", np.mean(metrics['val_scores']), step=trial.number)
-            exp.log_metric("mean_train_score", np.mean(metrics['train_scores']), step=trial.number)
-            exp.log_text(params, step=trial.number)
+        metrics = estimate_metrics(study_data, study_name, pipe_args, estimator, args['num_cv'], early_stop=True, metric=study.user_attrs['metric'])
             
+        # Log for later
         trial.set_user_attr("metrics", metrics)
         trial.set_user_attr("args", args)
         trial.set_user_attr("pipe_args", pipe_args)
-
-        # Log for later
-        res = {}
-        res['runname'] = runname
-        res['trial'] = trial.number
-        res['args'] = args
-        res['pipe_args'] = pipe_args
-        res['params'] = params
-        res['metrics'] = metrics
-        json_fn = os.path.join(p.out_dir, "{}-trial-{}.json".format(runname, trial.number))
-        dump_json(json_fn, res)
+        trial.set_user_attr("estimator_name", estimator_name)
+        trial.set_user_attr("estimator_params", params)
 
         return np.mean(metrics['val_scores'])
     
-    study = optuna.create_study(
-        study_name=args['optuna_study_name'],
-        #storage="sqlite:///eq_studies.db",
+    study = optuna.load_study(
+        study_name=args['study_name'],
         storage="postgresql://hpc3552@172.20.13.14/hpc3552",
-        sampler= optuna.samplers.TPESampler(
-            n_startup_trials = 100,
-            n_ei_candidates = 10,
-            constant_liar=True,
-        ),
-        direction="maximize",
-        load_if_exists = True,
     )
-    #study._storage = study._storage._backend
+   
+    study_data = StudyData(study, args['sample_frac'])
     
-    study.optimize(lambda trial: objective(trial, p.X, p.y, args, pipe_args, exp, runname, p),
+    study.optimize(lambda trial: objective(trial, args['study_name'], study_data),
                     n_trials=args['n_trials'], 
                     gc_after_trial=True)
 

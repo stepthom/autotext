@@ -49,31 +49,113 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 
 import geopy.distance
 
-class Project:
-    def __init__(self, id_col, target_col, out_dir, train_fn, test_fn, objective, num_class, metric, sample_frac=1.0):
+class StudyData:
+    def __init__(self, study, sample_frac=1.0):
         
-        self.id_col = id_col
-        self.target_col = target_col
-        self.out_dir = out_dir
-        self.train_fn = train_fn
-        self.test_fn = test_fn
-        self.train_df = pd.read_csv(self.train_fn)
-        self.test_df = pd.read_csv(self.test_fn)
+        self.train_df = pd.read_csv(study.user_attrs['train_fn'])
+        self.test_df = pd.read_csv(study.user_attrs['test_fn'])
         if sample_frac< 1.0:
             self.train_df  = self.train_df.sample(frac=sample_frac, random_state=3).reset_index(drop=True)
 
-        self.X = self.train_df.drop([self.id_col, self.target_col], axis=1)
-        self.X_test = self.test_df.drop([self.id_col], axis=1)
-        self.y = self.train_df[self.target_col]
+        self.X = self.train_df.drop([study.user_attrs['id_col'], study.user_attrs['target_col']], axis=1)
+        self.X_test = self.test_df.drop([study.user_attrs['id_col']], axis=1)
+        self.y = self.train_df[study.user_attrs['target_col']]
         self.label_transformer = LabelEncoder()
         self.y = self.label_transformer.fit_transform(self.y)
-        self.objective = objective
-        self.num_class = num_class
-        self.metric = metric
+        
+
+def get_pipeline_steps(study_name, pipe_args):
+    # Have to create a new pipeline all the time, thanks to a bug in category_encoders:
+    # https://github.com/scikit-learn-contrib/category_encoders/issues/313
+    
+    steps = []
+    
+    if study_name == "h1n1":
+    
+        _drop_cols = pipe_args.get('drop_cols', [])
+        if len(_drop_cols) > 0:
+            steps.append(('ddropper', SteveFeatureDropper(_drop_cols)))
+
+        # Indicator num
+        _num_cols = pipe_args.get('num_cols_indicator', [])
+        if len(_num_cols) > 0:
+            steps.append(
+                ('num_indicator', 
+                 SteveMissingIndicator(num_cols=_num_cols)
+                )
+            )
+            #steps.append(('bool_typer', SteveFeatureTyper(like="_missing", typestr='int32')))
+
+        # Impute num
+        _num_cols = pipe_args.get('num_cols_impute', [])
+        if len(_num_cols) > 0:
+            steps.append(
+                ('num_imputer', 
+                 SteveNumericImputer(num_cols=_num_cols, imputer=SimpleImputer(missing_values=np.nan, strategy="median"))
+                )
+            )
+
+        # Cat impute
+        _cat_cols = pipe_args.get('cat_cols_impute', [])
+        if len(_cat_cols) > 0:
+            steps.append(('cat_imputer', SteveCategoryImputer(_cat_cols)))
+
+        # Cat smush
+        _cat_cols = pipe_args.get('cat_cols_smush', [])
+        if len(_cat_cols) > 0:
+            steps.append(('cat_smush', SteveCategoryCoalescer(keep_top=5, cat_cols=_cat_cols)))
+
+        # Cat encode
+        _cat_cols = pipe_args.get('cat_cols_ordinal_encode', [])
+        if len(_cat_cols) > 0:
+            steps.append(
+                ('cat_encoder', 
+                 SteveEncoder(
+                     cols=_cat_cols,
+                     encoder=OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
+                     suffix="_oenc"
+                 )))
+            steps.append(('odropper', SteveFeatureDropper(_cat_cols)))
 
 
+        _cat_cols = pipe_args.get('cat_cols_onehot_encode', [])
+        if len(_cat_cols) > 0:
+            steps.append(
+                ('cat_enc1', 
+                 SteveEncoder(
+                     cols=_cat_cols,
+                     encoder=OneHotEncoder(handle_unknown='ignore', sparse=False, dtype=np.int32),
+                     suffix="_oheenc")
+                ))
+            steps.append(('phedropper', SteveFeatureDropper(_cat_cols)))
 
-def run_one(X, y, pipe_args, pipe_step_func, estimator):
+        _cat_cols = pipe_args.get('cat_cols_target_encode', [])
+        if len(_cat_cols) > 0:
+            steps.append(('typer', SteveFeatureTyper(cols=_cat_cols, typestr='category')))
+            enc =  ce.wrapper.PolynomialWrapper(
+                    ce.target_encoder.TargetEncoder(
+                        handle_unknown="value", 
+                        handle_missing="value", 
+                        min_samples_leaf=1, 
+                        smoothing=0.1, return_df=True))
+
+            steps.append(
+                ('cat_enc2', 
+                 SteveEncoder( cols=_cat_cols, encoder=enc, suffix="_tenc"
+                 )))
+
+            steps.append(('tdropper', SteveFeatureDropper(_cat_cols)))
+
+        _float_cols = pipe_args.get('float_cols', [])
+        if len(_float_cols) > 0 and pipe_args.get('autofeat', 0) == 1:
+            steps.append(('num_autofeat', SteveAutoFeatLight(_float_cols, compute_ratio=True, compute_product=True, scale=True)))
+
+        if len(_float_cols) > 0 and pipe_args.get('normalize', 0) == 1:
+            steps.append(('num_normalizer', SteveNumericNormalizer(_float_cols, drop_orig=True)))
+        
+    return steps
+
+def run_one(study_data, study_name, pipe_args, estimator):
     """
     X, y: features and target
     pipe_args: args to control FE pipeline
@@ -86,7 +168,7 @@ def run_one(X, y, pipe_args, pipe_step_func, estimator):
     
     print("run_one: pipe_args: {}".format(pipe_args))
           
-    steps = pipe_step_func(pipe_args)
+    steps = get_pipeline_steps(study_name, pipe_args)
     pipe = Pipeline(steps)
 
     pipe.fit(X, y)
@@ -118,7 +200,7 @@ def run_one(X, y, pipe_args, pipe_step_func, estimator):
     return pipe, estimator
 
 
-def estimate_metrics(X, y, pipe_args, pipe_steps_func, estimator, num_cv=5, early_stop=True, project=None):
+def estimate_metrics(study_data, study_name, pipe_args, estimator, num_cv=5, early_stop=True, metric="f1"):
     """
     X, y: features and target
     pipe_args: args to control FE pipeline
@@ -140,15 +222,15 @@ def estimate_metrics(X, y, pipe_args, pipe_steps_func, estimator, num_cv=5, earl
     skf = StratifiedKFold(n_splits=num_cv, random_state=42, shuffle=True)
 
     cv_step = -1
-    for train_index, val_index in skf.split(X, y):
+    for train_index, val_index in skf.split(study_data.X, study_data.y):
         cv_step = cv_step + 1
         print("========================================")
         print("estimate_metrics: cv_step {} of {}".format(cv_step, num_cv))
 
-        X_train, X_val = X.loc[train_index].reset_index(drop=True), X.loc[val_index].reset_index(drop=True)
-        y_train, y_val = y[train_index], y[val_index]
+        X_train, X_val = study_data.X.loc[train_index].reset_index(drop=True), study_data.X.loc[val_index].reset_index(drop=True)
+        y_train, y_val = study_data.y[train_index], study_data.y[val_index]
 
-        steps = pipe_steps_func(pipe_args)
+        steps = get_pipeline_steps(study_name, pipe_args)
         pipe = Pipeline(steps)
 
         pipe.fit(X_train, y_train)
@@ -195,24 +277,23 @@ def estimate_metrics(X, y, pipe_args, pipe_steps_func, estimator, num_cv=5, earl
         print("estimate_metric: calc Val metrics. ")
         y_val_pred_proba = estimator.predict_proba(_X_val)
         y_val_pred = estimator.predict(_X_val)
-        print(project.metric)
-        if project.metric == "f1":
+        if metric == "f1":
             val_score =  f1_score(y_val, y_val_pred, average="micro")
-        elif project.metric == "roc_auc":
+        elif metric == "roc_auc":
             print('calculating roc_auc')
-            val_score =  roc_auc_score(y_val, y_val_pred, average="macro")
+            val_score =  roc_auc_score(y_val, y_val_pred_proba[:,1], average="macro")
                 
         val_scores.append(val_score)
         print("val_score = {}".format(val_score))
         print(classification_report(y_val, y_val_pred, digits=4))
 
         print("estimate_metric: calc Train metrics. ")
-        #y_train_pred_proba = estimator.predict_proba(_X_train)
+        y_train_pred_proba = estimator.predict_proba(_X_train)
         y_train_pred = estimator.predict(_X_train)
-        if project.metric == "f1":
+        if metric == "f1":
             train_score =  f1_score(y_train, y_train_pred, average="micro")
-        elif project.metric == "roc_auc":
-            train_score =  roc_auc_score(y_train, y_train_pred, average="macro")
+        elif metric == "roc_auc":
+            train_score =  roc_auc_score(y_train, y_train_pred_proba[:,1], average="macro")
         train_scores.append(train_score)
         #print(classification_report(y_train, y_train_pred, digits=4))
 
@@ -657,7 +738,7 @@ class SteveEncoder(BaseEstimator, TransformerMixin):
         self.suffix = suffix
         
     def fit(self, X, y=None):
-        print('SteveEncoder')
+        #print('SteveEncoder')
         #print(self.cols)
         #print(self.encoder)
         #print(type(X))
@@ -667,7 +748,7 @@ class SteveEncoder(BaseEstimator, TransformerMixin):
 
     def transform(self, X, y=None):
         _X = X.copy()
-        print('steve encoder:trans')
+        #print('steve encoder:trans')
         #print(_X.shape)
         #print(_X.columns)
         
@@ -809,7 +890,7 @@ class SteveMissingIndicator(BaseEstimator, TransformerMixin):
         self.num_cols = num_cols
         self.num_indicator = MissingIndicator(features="all")
     def fit(self, X, y=None):
-        print('SteveMissingIndicator:fit')
+        #print('SteveMissingIndicator:fit')
         self.num_indicator.fit(X[self.num_cols], y)
         return self
     def transform(self, X, y=None):
@@ -941,7 +1022,7 @@ class SteveFeatureTyper(BaseEstimator, TransformerMixin):
         self.like = like
         self.typestr = typestr
     def fit(self, X, y=None):
-        print("SteveFeatureTyper:fit")
+        #print("SteveFeatureTyper:fit")
         self._cols = self.cols
         if self.like is not None:
             for col in X.columns.values:
@@ -950,7 +1031,7 @@ class SteveFeatureTyper(BaseEstimator, TransformerMixin):
         self._cols = list(set(self._cols))
         return self
     def transform(self, X, y=None):
-        print("SteveFeatureTyper:transform")
+        #print("SteveFeatureTyper:transform")
         _X = X.copy()
         _X[self._cols] = _X[self._cols].astype(self.typestr)
         return _X
