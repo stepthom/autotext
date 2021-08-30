@@ -5,9 +5,7 @@ import argparse
 import numpy as np
 import pandas as pd
 import os
-
-import json
-from json.decoder import JSONDecodeError
+from pprint import pprint; 
 
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
@@ -16,103 +14,87 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 
-import SteveHelpers
+import optuna
+
+from SteveHelpers import StudyData, run_one
           
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--project', type=str, default="eq")
+    parser.add_argument('-s', '--storage', type=str, default="postgresql://hpc3552@172.20.13.14/hpc3552")
     parser.add_argument('--sample-frac', type=float, default=1.0)
     parser.add_argument('--skip-output', type=int, default=0)
     args = parser.parse_args()
-    args = vars(args)
-
-    if args['project'] == "eq":
-        from EQHelpers import get_project, get_pipeline_steps
-        trial_logs = [
-
-            # lgbm, 
-            #"earthquake/out/-trial-.json",
-
-            # lgbm, 0.7553, 0.7533
-            "earthquake/out/583b7931b2274e45839372114f3dc80f-trial-43.json",
-
-            # lgbm, 0.7544, 0.7519
-            #"earthquake/out/583b7931b2274e45839372114f3dc80f-trial-21.json",
-
-            # lgbm, 0.7548, 
-            #"earthquake/out/583b7931b2274e45839372114f3dc80f-trial-22.json",
-
-            # xgboost, 0.7516, 0.7437
-            #"earthquake/out/b7bce481fcab40de88418a34fc05f4c0-trial-26.json",
-
-            # hist, 0.7480, 0.7458
-            #"earthquake/out/0a7930f91e194ed2b0d18b9a01352b31-trial-67.json", 
-        ]
-    elif args['project'] == "h1n1":
-        from H1N1Helpers import get_project, get_pipeline_steps
-        trial_logs = []
-        
-    p = get_project(args['sample_frac'])
     
+    trials_to_run = {}
+    trials_to_run["h1n1"]  = [3]
+    trials_to_run["seasonal"]  = [0, 1]
     
-    i = 0
-    for trial_log in trial_logs:
-        i = i + 1
-        run = SteveHelpers.read_json(trial_log)
-       
-        run_args = run['args']
-        pipe_args = run['pipe_args']
-        params = run['params']
-        metrics = run['metrics']
-        runname = run['runname']
-        trial = run['trial']
-        
-        n_estimators = None
-        bi = metrics.get('best_iterations_range', [])
-        if len(bi) > 0:
+    for study_name, trial_numbers in trials_to_run.items():
+        print("Study name {}".format(study_name))
+
+        study = optuna.load_study(study_name=study_name, storage=args.storage)
+        study_data = StudyData(study, args.sample_frac)
+
+        for trial_number in trial_numbers:
+            print("Trial number {}".format(trial_number))
+            trial =  study.trials[trial_number]
+            params = trial.params
+            estimator_name = trial.user_attrs['estimator_name']
+            estimator_params = trial.user_attrs['estimator_params']
+            metrics = trial.user_attrs['metrics']
+
+            pprint(params)
+            pprint(metrics)
+            pprint(trial.user_attrs['proba_fn'])
             
-            # This seems to be about best
-            n_estimators = np.floor(max(bi)).astype(int)
+            n_estimators = None
+            bi = metrics.get('best_iterations_range', [])
+            if len(bi) > 0:
+                # This seems to be about best
+                n_estimators = np.floor(max(bi)).astype(int)
+
+            estimator = None
+            if estimator_name == "lgbm":
+                params['n_estimators'] = n_estimators
+                estimator = LGBMClassifier(**estimator_params)
+            elif estimator_name == "xgboost":
+                params['n_estimators'] = n_estimators
+                estimator = XGBClassifier(**estimator_params)
+            elif estimator_name == "rf":
+                estimator = RandomForestClassifier(**estimator_params)
+            elif estimator_name == "lr":
+                estimator = LogisticRegression(**estimator_params)
+            elif estimator_name == "hist":
+                estimator = HistGradientBoostingClassifier(**estimator_params)
+            else:
+                print("Unknown estimator name {}".format(estimator_name))
+
+            pipe, estimator = run_one(study_data, study_name, params['pipe_name'], estimator)
+
+            if args.skip_output == 1:
+                print("Not producing predictions files. Returning.")
+                return
+
+            _X_test = pipe.transform(study_data.X_test)
+            probas = estimator.predict_proba(_X_test)
+            preds  = estimator.predict(_X_test)
+            preds = study_data.label_transformer.inverse_transform(preds)
+
+            id_col = study.user_attrs['id_col']
+            target_col = study.user_attrs['target_col']
+            out_dir = study.user_attrs['out_dir']
             
-        estimator = None
-        if run_args['estimator_name'] == "lgbm":
-            params['n_estimators'] = n_estimators
-            estimator = LGBMClassifier(**params)
-        elif run_args['estimator_name'] == "xgboost":
-            params['n_estimators'] = n_estimators
-            estimator = XGBClassifier(**params)
-        elif run_args['estimator_name'] == "rf":
-            estimator = RandomForestClassifier(**params)
-        elif run_args['estimator_name'] == "lr":
-            estimator = LogisticRegression(**params)
-        elif run_args['estimator_name'] == "hist":
-            estimator = HistGradientBoostingClassifier(**params)
-        else:
-            print("Unknown estimator name {}".format(estimator_name))
-                           
-        pipe, estimator = SteveHelpers.run_one(p.X, p.y, pipe_args, get_pipeline_steps, estimator)
-        
-        if args["skip_output"] == 1:
-            print("Not producing predictions files. Returning.")
-            return
-                                             
-        _X_test = pipe.transform(p.X_test)
-        probas = estimator.predict_proba(_X_test)
-        preds  = estimator.predict(_X_test)
-        preds = p.label_transformer.inverse_transform(preds)
+            preds_df = pd.DataFrame(data={'id': study_data.test_df[id_col], target_col: preds})
+            preds_fn = os.path.join(out_dir, "{}-{}-preds.csv".format(study_name, trial_number))
+            preds_df.to_csv(preds_fn, index=False)
+            print("level2: Wrote preds file: {}".format(preds_fn))
 
-        preds_df = pd.DataFrame(data={'id': p.test_df[p.id_col], p.target_col: preds})
-        preds_fn = os.path.join(p.out_dir, "{}-{}-preds.csv".format(runname, trial))
-        preds_df.to_csv(preds_fn, index=False)
-        print("level2: Wrote preds file: {}".format(preds_fn))
-
-        probas_df = pd.DataFrame(probas, columns=p.label_transformer.classes_)
-        probas_df[p.id_col] = p.test_df[p.id_col]
-        probas_df = probas_df[ [p.id_col] + [ col for col in probas_df.columns if col != p.id_col ] ]
-        probas_fn = os.path.join(p.out_dir, "{}-{}-probas.csv".format(runname, trial))
-        probas_df.to_csv(probas_fn, index=False)
-        print("level2: Wrote probas file: {}".format(probas_fn))
-
-    
+            probas_df = pd.DataFrame(probas, columns=study_data.label_transformer.classes_)
+            probas_df[id_col] = study_data.test_df[id_col]
+            probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
+            probas_fn = os.path.join(out_dir, "{}-{}-probas.csv".format(study_name, trial_number))
+            probas_df.to_csv(probas_fn, index=False)
+            print("level2: Wrote probas file: {}".format(probas_fn))
+            
 if __name__ == "__main__":
     main()
