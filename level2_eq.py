@@ -26,8 +26,8 @@ def main():
     args = parser.parse_args()
     
     trials_to_run = {}
-    trials_to_run["h1n1"]  = [3]
-    trials_to_run["seasonal"]  = [0, 1]
+    trials_to_run["h1n1"]  = [33]
+    trials_to_run["seasonal"]  = [29]
     
     for study_name, trial_numbers in trials_to_run.items():
         print("Study name {}".format(study_name))
@@ -45,7 +45,6 @@ def main():
 
             pprint(params)
             pprint(metrics)
-            pprint(trial.user_attrs['proba_fn'])
             
             n_estimators = None
             bi = metrics.get('best_iterations_range', [])

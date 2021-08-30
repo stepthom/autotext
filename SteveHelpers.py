@@ -64,13 +64,101 @@ class StudyData:
         self.y = self.label_transformer.fit_transform(self.y)
         
 
-def get_pipeline_steps(study_name, pipe_args):
+def get_pipeline_steps(study_name, pipe_name):
     # Have to create a new pipeline all the time, thanks to a bug in category_encoders:
     # https://github.com/scikit-learn-contrib/category_encoders/issues/313
     
     steps = []
     
-    if study_name == "h1n1":
+    if study_name == "h1n1" or study_name == "seasonal":
+        all_pipe_args = {}
+        all_pipe_args['01'] = {
+           "drop_cols":[  ],
+           "num_cols_impute":[
+              "h1n1_concern", "h1n1_knowledge", "behavioral_antiviral_meds",
+              "behavioral_avoidance", "behavioral_face_mask", "behavioral_wash_hands",
+              "behavioral_large_gatherings", "behavioral_outside_home", "behavioral_touch_face",
+              "doctor_recc_h1n1", "doctor_recc_seasonal", "chronic_med_condition",
+              "child_under_6_months", "health_worker", "health_insurance",
+              "opinion_h1n1_vacc_effective", "opinion_h1n1_risk", "opinion_h1n1_sick_from_vacc",
+              "opinion_seas_vacc_effective", "opinion_seas_risk", "opinion_seas_sick_from_vacc",
+              "household_adults", "household_children"
+           ],
+           "num_cols_indicator":[
+              "h1n1_concern", "h1n1_knowledge", "behavioral_antiviral_meds",
+              "behavioral_avoidance", "behavioral_face_mask", "behavioral_wash_hands",
+              "behavioral_large_gatherings", "behavioral_outside_home", "behavioral_touch_face",
+              "doctor_recc_h1n1", "doctor_recc_seasonal", "chronic_med_condition",
+              "child_under_6_months", "health_worker", "health_insurance",
+              "opinion_h1n1_vacc_effective", "opinion_h1n1_risk", "opinion_h1n1_sick_from_vacc",
+              "opinion_seas_vacc_effective", "opinion_seas_risk", "opinion_seas_sick_from_vacc",
+              "household_adults", "household_children"
+           ],
+           "cat_cols_impute":[
+              "age_group", "education", "race",
+              "sex", "income_poverty", "marital_status",
+              "rent_or_own", "employment_status", "hhs_geo_region",
+              "census_msa", "employment_industry", "employment_occupation"
+           ],
+           "cat_cols_smush":[
+              "age_group", "education", "race",
+              "sex", "income_poverty", "marital_status",
+              "rent_or_own", "employment_status", "hhs_geo_region",
+              "census_msa", "employment_industry", "employment_occupation"
+           ],
+           "cat_cols_onehot_encode":[  ],
+           "cat_cols_target_encode":[  ],
+           "cat_cols_ordinal_encode":[
+              "age_group", "education", "race",
+              "sex", "income_poverty", "marital_status",
+              "rent_or_own", "employment_status", "hhs_geo_region",
+              "census_msa", "employment_industry", "employment_occupation"
+           ],
+           "float_cols":[  ],
+           "autofeat":0,
+           "normalize":0
+        }
+
+        all_pipe_args['02'] = {
+           "drop_cols":[  ],
+           "num_cols_impute":[
+              "h1n1_concern", "h1n1_knowledge", "behavioral_antiviral_meds",
+              "behavioral_avoidance", "behavioral_face_mask", "behavioral_wash_hands",
+              "behavioral_large_gatherings", "behavioral_outside_home", "behavioral_touch_face",
+              "doctor_recc_h1n1", "doctor_recc_seasonal", "chronic_med_condition",
+              "child_under_6_months", "health_worker", "health_insurance",
+              "opinion_h1n1_vacc_effective", "opinion_h1n1_risk", "opinion_h1n1_sick_from_vacc",
+              "opinion_seas_vacc_effective", "opinion_seas_risk", "opinion_seas_sick_from_vacc",
+              "household_adults", "household_children"
+           ],
+           "num_cols_indicator":[
+              "h1n1_concern", "h1n1_knowledge", "behavioral_antiviral_meds",
+              "behavioral_avoidance", "behavioral_face_mask", "behavioral_wash_hands",
+              "behavioral_large_gatherings", "behavioral_outside_home", "behavioral_touch_face",
+              "doctor_recc_h1n1", "doctor_recc_seasonal", "chronic_med_condition",
+              "child_under_6_months", "health_worker", "health_insurance",
+              "opinion_h1n1_vacc_effective", "opinion_h1n1_risk", "opinion_h1n1_sick_from_vacc",
+              "opinion_seas_vacc_effective", "opinion_seas_risk", "opinion_seas_sick_from_vacc",
+              "household_adults", "household_children"
+           ],
+           "cat_cols_impute":[
+              "age_group", "education", "race", "sex",
+              "income_poverty", "marital_status", "rent_or_own", "employment_status",
+              "hhs_geo_region", "census_msa", "employment_industry", "employment_occupation"
+           ],
+           "cat_cols_onehot_encode":[  ],
+           "cat_cols_target_encode":[
+              "age_group", "education", "race", "sex",
+              "income_poverty", "marital_status", "rent_or_own", "employment_status",
+              "hhs_geo_region", "census_msa", "employment_industry", "employment_occupation"
+           ],
+           "cat_cols_ordinal_encode":[  ],
+           "float_cols":[  ],
+           "autofeat":0,
+           "normalize":0
+        }
+        
+        pipe_args = all_pipe_args[pipe_name]
     
         _drop_cols = pipe_args.get('drop_cols', [])
         if len(_drop_cols) > 0:
@@ -152,10 +240,119 @@ def get_pipeline_steps(study_name, pipe_args):
 
         if len(_float_cols) > 0 and pipe_args.get('normalize', 0) == 1:
             steps.append(('num_normalizer', SteveNumericNormalizer(_float_cols, drop_orig=True)))
+            
+    elif study_name == "eq":
+        all_pipe_args = {}
+        all_pipe_args['01'] = {
+            "drop_cols": [],
+            "cat_cols_onehot_encode": [],
+            "cat_cols_target_encode": [],
+            "cat_cols_ordinal_encode": [
+                "geo_level_1_id", "geo_level_2_id", "geo_level_3_id",
+                "land_surface_condition", "foundation_type", "roof_type", 
+                "ground_floor_type", "other_floor_type", "position", "plan_configuration",  "legal_ownership_status"],
+            "float_cols": ["count_floors_pre_eq", "age", "area_percentage", "height_percentage", "count_families"],
+            "autofeat": 0,
+            "normalize": 1
+        }
+            
+        all_pipe_args['02'] = {
+            "drop_cols": [],
+            "cat_cols_onehot_encode": [],
+            "cat_cols_target_encode": ["geo_level_1_id", "geo_level_2_id", "geo_level_3_id"],
+            "cat_cols_ordinal_encode": [
+                "land_surface_condition", "foundation_type", "roof_type", 
+                "ground_floor_type", "other_floor_type", "position", "plan_configuration",  "legal_ownership_status"],
+            "float_cols": ["count_floors_pre_eq", "age", "area_percentage", "height_percentage", "count_families"],
+            "autofeat": 0,
+            "normalize": 1
+        }
+        
+        all_pipe_args['03'] = {
+            "drop_cols": [],
+            "cat_cols_onehot_encode": [],
+            "cat_cols_target_encode": [
+                "geo_level_1_id", "geo_level_2_id", "geo_level_3_id",
+                "land_surface_condition", "foundation_type", "roof_type", 
+                "ground_floor_type", "other_floor_type", "position", "plan_configuration",  "legal_ownership_status"],
+            "cat_cols_ordinal_encode": [],
+            "float_cols": ["count_floors_pre_eq", "age", "area_percentage", "height_percentage", "count_families"],
+            "autofeat": 0,
+            "normalize": 1
+        }
+        all_pipe_args['04'] = {
+            "drop_cols": [],
+            "cat_cols_onehot_encode": [],
+            "cat_cols_target_encode": [ "geo_level_3_id"], 
+            "cat_cols_ordinal_encode": [
+                "geo_level_1_id", "geo_level_2_id",
+                "land_surface_condition", "foundation_type", "roof_type", 
+                "ground_floor_type", "other_floor_type", "position", "plan_configuration",  "legal_ownership_status"],
+            "float_cols": ["count_floors_pre_eq", "age", "area_percentage", "height_percentage", "count_families"],
+            "autofeat": 0,
+            "normalize": 1
+        }
+        
+        pipe_args = all_pipe_args[pipe_name] 
+        _drop_cols = pipe_args.get('drop_cols', [])
+        if len(_drop_cols) > 0:
+            steps.append(('ddropper', SteveFeatureDropper(_drop_cols)))
+
+        _cat_cols = pipe_args.get('cat_cols_ordinal_encode', [])
+        if len(_cat_cols) > 0:
+            steps.append(
+                ('cat_encoder', 
+                 SteveEncoder(
+                     cols=_cat_cols,
+                     encoder=OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
+                     suffix="_oenc"
+                 )))
+            steps.append(('odropper', SteveFeatureDropper(_cat_cols)))
+
+            #steps.append(('otyper', SteveFeatureTyper(like="_oenc", typestr='category')))
+
+
+        _cat_cols = pipe_args.get('cat_cols_onehot_encode', [])
+        if len(_cat_cols) > 0:
+            steps.append(
+                ('cat_enc1', 
+                 SteveEncoder(
+                     cols=_cat_cols,
+                     encoder=OneHotEncoder(handle_unknown='ignore', sparse=False, dtype=np.int32),
+                     suffix="_oheenc")
+                ))
+            steps.append(('phedropper', SteveFeatureDropper(_cat_cols)))
+
+        _cat_cols = pipe_args.get('cat_cols_target_encode', [])
+        if len(_cat_cols) > 0:
+            steps.append(('typer', SteveFeatureTyper(cols=_cat_cols, typestr='category')))
+            enc =  ce.wrapper.PolynomialWrapper(
+                    ce.target_encoder.TargetEncoder(
+                        handle_unknown="value", 
+                        handle_missing="value", 
+                        min_samples_leaf=1, 
+                        smoothing=0.1, return_df=True))
+
+            steps.append(
+                ('cat_enc2', 
+                 SteveEncoder( cols=_cat_cols, encoder=enc, suffix="_tenc"
+                 )))
+
+            steps.append(('tdropper', SteveFeatureDropper(_cat_cols)))
+
+        steps.append(('num_capper', SteveNumericCapper(num_cols=['age'], max_val=30)))
+
+        _float_cols = pipe_args.get('float_cols', [])
+        if len(_float_cols) > 0 and pipe_args.get('autofeat', 0) == 1:
+            steps.append(('num_autofeat', SteveAutoFeatLight(_float_cols, compute_ratio=True, compute_product=True, scale=True)))
+
+        if len(_float_cols) > 0 and pipe_args.get('normalize', 0) == 1:
+            steps.append(('num_normalizer', SteveNumericNormalizer(_float_cols, drop_orig=True)))
+            
         
     return steps
 
-def run_one(study_data, study_name, pipe_args, estimator):
+def run_one(study_data, study_name, pipe_name, estimator):
     """
     X, y: features and target
     pipe_args: args to control FE pipeline
@@ -166,13 +363,11 @@ def run_one(study_data, study_name, pipe_args, estimator):
     train_scores: estimated val score for each each CV fold
     """
     
-    print("run_one: pipe_args: {}".format(pipe_args))
-          
-    steps = get_pipeline_steps(study_name, pipe_args)
+    steps = get_pipeline_steps(study_name, pipe_name)
     pipe = Pipeline(steps)
 
-    pipe.fit(X, y)
-    _X = pipe.transform(X)
+    pipe.fit(study_data.X, study_data.y)
+    _X = pipe.transform(study_data.X)
     check_dataframe(_X, "_X")
         
     extra_fit_params = {}
@@ -193,14 +388,14 @@ def run_one(study_data, study_name, pipe_args, estimator):
     start = time.time()
     print("run_one: estimator: {}".format(estimator))
     print("run_one: fitting...: ")
-    estimator.fit(_X, y, **extra_fit_params)
+    estimator.fit(_X, study_data.y, **extra_fit_params)
     duration = (time.time() - start)
     print("run_one: done. Time {}".format(duration))
     
     return pipe, estimator
 
 
-def estimate_metrics(study_data, study_name, pipe_args, estimator, num_cv=5, early_stop=True, metric="f1"):
+def estimate_metrics(study_data, study_name, pipe_name, estimator, num_cv=5, early_stop=True, metric="f1"):
     """
     X, y: features and target
     pipe_args: args to control FE pipeline
@@ -217,8 +412,6 @@ def estimate_metrics(study_data, study_name, pipe_args, estimator, num_cv=5, ear
     train_times = []
     best_iterations = []
     
-    print("estimate_metrics: pipe_args: {}".format(pipe_args))
-          
     skf = StratifiedKFold(n_splits=num_cv, random_state=42, shuffle=True)
 
     cv_step = -1
@@ -230,7 +423,7 @@ def estimate_metrics(study_data, study_name, pipe_args, estimator, num_cv=5, ear
         X_train, X_val = study_data.X.loc[train_index].reset_index(drop=True), study_data.X.loc[val_index].reset_index(drop=True)
         y_train, y_val = study_data.y[train_index], study_data.y[val_index]
 
-        steps = get_pipeline_steps(study_name, pipe_args)
+        steps = get_pipeline_steps(study_name, pipe_name)
         pipe = Pipeline(steps)
 
         pipe.fit(X_train, y_train)

@@ -40,7 +40,7 @@ def main():
     print(args)
         
     def objective(trial, study_name, project):
-        estimator_name = trial.suggest_categorical("estimator_name", ["lgbm", "xgboost", "rf", "hist"])
+        estimator_name = trial.suggest_categorical("estimator_name", ["lgbm", "xgboost", "rf"])
         
         if study_name == "h1n1":
             pipe_name = trial.suggest_categorical("pipe_name", ['01', '02'])
