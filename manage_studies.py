@@ -52,8 +52,8 @@ if __name__ == "__main__":
             study_name="eq",
             storage=args.storage,
             sampler= optuna.samplers.TPESampler(
-                n_startup_trials = 100,
-                n_ei_candidates = 10,
+                n_startup_trials = 400,
+                n_ei_candidates = 20,
                 constant_liar=True,
             ),
             direction="maximize",
@@ -85,7 +85,8 @@ if __name__ == "__main__":
         study.set_user_attr("metric", "accuracy")
         
     if args.delete_studies == 1:
-        study_names = ['h1n1', 'seasonal', 'eq', 'pump']
+        #study_names = ['h1n1', 'seasonal', 'eq', 'pump']
+        study_names = ['eq']
         for study_name in study_names:
             print("Deleting study: {}".format(study_name))
             optuna.delete_study(study_name=study_name, storage=args.storage)

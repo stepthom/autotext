@@ -101,10 +101,10 @@ def get_pipeline_steps(study_name, pipe_name):
               "census_msa", "employment_industry", "employment_occupation"
            ],
            "cat_cols_smush":[
-              "age_group", "education", "race",
-              "sex", "income_poverty", "marital_status",
-              "rent_or_own", "employment_status", "hhs_geo_region",
-              "census_msa", "employment_industry", "employment_occupation"
+              #"age_group", "education", "race",
+              #"sex", "income_poverty", "marital_status",
+              #"rent_or_own", "employment_status", 
+              "hhs_geo_region", "census_msa", "employment_industry", "employment_occupation"
            ],
            "cat_cols_onehot_encode":[  ],
            "cat_cols_target_encode":[  ],
@@ -147,12 +147,12 @@ def get_pipeline_steps(study_name, pipe_name):
               "hhs_geo_region", "census_msa", "employment_industry", "employment_occupation"
            ],
            "cat_cols_onehot_encode":[  ],
-           "cat_cols_target_encode":[
+           "cat_cols_target_encode":[  ],
+           "cat_cols_ordinal_encode":[  
               "age_group", "education", "race", "sex",
               "income_poverty", "marital_status", "rent_or_own", "employment_status",
               "hhs_geo_region", "census_msa", "employment_industry", "employment_occupation"
            ],
-           "cat_cols_ordinal_encode":[  ],
            "float_cols":[  ],
            "autofeat":0,
            "normalize":0
@@ -191,7 +191,7 @@ def get_pipeline_steps(study_name, pipe_name):
         # Cat smush
         _cat_cols = pipe_args.get('cat_cols_smush', [])
         if len(_cat_cols) > 0:
-            steps.append(('cat_smush', SteveCategoryCoalescer(keep_top=5, cat_cols=_cat_cols)))
+            steps.append(('cat_smush', SteveCategoryCoalescer(keep_top=11, cat_cols=_cat_cols)))
 
         # Cat encode
         _cat_cols = pipe_args.get('cat_cols_ordinal_encode', [])
@@ -253,43 +253,20 @@ def get_pipeline_steps(study_name, pipe_name):
                 "ground_floor_type", "other_floor_type", "position", "plan_configuration",  "legal_ownership_status"],
             "float_cols": ["count_floors_pre_eq", "age", "area_percentage", "height_percentage", "count_families"],
             "autofeat": 0,
-            "normalize": 1
+            "manual_feats": 1,
+            "normalize": 1,
         }
             
         all_pipe_args['02'] = {
             "drop_cols": [],
             "cat_cols_onehot_encode": [],
-            "cat_cols_target_encode": ["geo_level_1_id", "geo_level_2_id", "geo_level_3_id"],
+            "cat_cols_target_encode": ["geo_level_1_id", "geo_level_2_id"],
             "cat_cols_ordinal_encode": [
-                "land_surface_condition", "foundation_type", "roof_type", 
+                "geo_level_3_id", "land_surface_condition", "foundation_type", "roof_type", 
                 "ground_floor_type", "other_floor_type", "position", "plan_configuration",  "legal_ownership_status"],
             "float_cols": ["count_floors_pre_eq", "age", "area_percentage", "height_percentage", "count_families"],
             "autofeat": 0,
-            "normalize": 1
-        }
-        
-        all_pipe_args['03'] = {
-            "drop_cols": [],
-            "cat_cols_onehot_encode": [],
-            "cat_cols_target_encode": [
-                "geo_level_1_id", "geo_level_2_id", "geo_level_3_id",
-                "land_surface_condition", "foundation_type", "roof_type", 
-                "ground_floor_type", "other_floor_type", "position", "plan_configuration",  "legal_ownership_status"],
-            "cat_cols_ordinal_encode": [],
-            "float_cols": ["count_floors_pre_eq", "age", "area_percentage", "height_percentage", "count_families"],
-            "autofeat": 0,
-            "normalize": 1
-        }
-        all_pipe_args['04'] = {
-            "drop_cols": [],
-            "cat_cols_onehot_encode": [],
-            "cat_cols_target_encode": [ "geo_level_3_id"], 
-            "cat_cols_ordinal_encode": [
-                "geo_level_1_id", "geo_level_2_id",
-                "land_surface_condition", "foundation_type", "roof_type", 
-                "ground_floor_type", "other_floor_type", "position", "plan_configuration",  "legal_ownership_status"],
-            "float_cols": ["count_floors_pre_eq", "age", "area_percentage", "height_percentage", "count_families"],
-            "autofeat": 0,
+            "manual_feats": 1,
             "normalize": 1
         }
         
@@ -308,8 +285,6 @@ def get_pipeline_steps(study_name, pipe_name):
                      suffix="_oenc"
                  )))
             steps.append(('odropper', SteveFeatureDropper(_cat_cols)))
-
-            #steps.append(('otyper', SteveFeatureTyper(like="_oenc", typestr='category')))
 
 
         _cat_cols = pipe_args.get('cat_cols_onehot_encode', [])
@@ -352,6 +327,7 @@ def get_pipeline_steps(study_name, pipe_name):
         
     return steps
 
+
 def run_one(study_data, study_name, pipe_name, estimator):
     """
     X, y: features and target
@@ -389,6 +365,9 @@ def run_one(study_data, study_name, pipe_name, estimator):
     print("run_one: estimator: {}".format(estimator))
     print("run_one: fitting...: ")
     estimator.fit(_X, study_data.y, **extra_fit_params)
+    #from sklearn.calibration import CalibratedClassifierCV
+    #estimator2 = CalibratedClassifierCV(base_estimator=estimator, cv=5)
+    #estimator2.fit(_X, study_data.y, **extra_fit_params)
     duration = (time.time() - start)
     print("run_one: done. Time {}".format(duration))
     
@@ -497,6 +476,7 @@ def estimate_metrics(study_data, study_name, pipe_name, estimator, num_cv=5, ear
             bi = estimator.best_iteration
         if bi is not None:
             best_iterations.append(bi)
+        print("best iteration: {}".format(bi))
           
     def mean_confidence_interval(data, confidence=0.95):
         a = 1.0 * np.array(data)
@@ -925,10 +905,11 @@ class SteveCategoryImputer(BaseEstimator, TransformerMixin):
         return _X
     
 class SteveEncoder(BaseEstimator, TransformerMixin):
-    def __init__(self, cols=None, encoder=None, suffix="_enc"):
+    def __init__(self, cols=None, encoder=None, suffix="_enc", drop_orig=False):
         self.cols = cols
         self.encoder = encoder
         self.suffix = suffix
+        self.drop_orig = drop_orig
         
     def fit(self, X, y=None):
         #print('SteveEncoder')
@@ -947,7 +928,8 @@ class SteveEncoder(BaseEstimator, TransformerMixin):
         
         _new_cols = self.encoder.transform(_X[self.cols])
         
-        colnames = ["{}_{}".format(i, self.suffix) for i in range(_new_cols.shape[1])]
+        #colnames = ["{}_{}".format(i, self.suffix) for i in range(_new_cols.shape[1])]
+        colnames = ["{}_{}".format(col, self.suffix) for col in self.cols]
         colnames = [re.sub('[^A-Za-z0-9_]+', 'J', x) for x in colnames]
         
         if isinstance(_new_cols, pd.DataFrame):
@@ -961,8 +943,28 @@ class SteveEncoder(BaseEstimator, TransformerMixin):
         #print("After concat")
         #print(_X.shape)
         #print(_X.head())
+        if self.drop_orig:
+            _X = _X.drop(self.cols, axis=1)
         
         return _X
+    
+    
+class SteveFeatureCombinerEQ(BaseEstimator, TransformerMixin):
+    def __init__(self):
+        pass
+        
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X, y=None):
+        _X = X.copy()
+        _X["height_mult_area"]    = _X["height_percentage"] * _X["area_percentage"]
+        _X["height_div_floors"]   = _X["height_percentage"] / _X["count_floors_pre_eq"]
+        _X["families_div_floors"] = _X["count_families"] / _X["count_floors_pre_eq"]
+        _X["area_mult_age"]       = _X["area_percentage"] * _X["age"]
+        _X["area_div_floors"]     = _X["area_percentage"] / _X["count_floors_pre_eq"]
+        return _X
+
     
 class SteveNumericImputer(BaseEstimator, TransformerMixin):
     def __init__(self, num_cols=None, imputer=None):
@@ -970,7 +972,7 @@ class SteveNumericImputer(BaseEstimator, TransformerMixin):
         self.imputer = imputer
         
     def fit(self, X, y=None):
-        print('SteveNumericImputer')
+        #print('SteveNumericImputer')
         self.imputer.fit(X[self.num_cols], y)
         return self
 
