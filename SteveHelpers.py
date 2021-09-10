@@ -63,6 +63,27 @@ class StudyData:
         self.label_transformer = LabelEncoder()
         self.y = self.label_transformer.fit_transform(self.y)
         
+def get_eq_pipeline():
+    cat_cols = [
+            "geo_level_1_id", "geo_level_2_id", "geo_level_3_id",
+            "land_surface_condition", "foundation_type", "roof_type", 
+            "ground_floor_type", "other_floor_type", "position", "plan_configuration",  "legal_ownership_status"]
+
+    steps = []
+    steps.append(('ord_encoder',  SteveEncoder( 
+        cols=cat_cols, suffix="_oenc", drop_orig=True,
+        encoder=OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
+    )))
+    steps.append(('combiner1', SteveFeatureCombinerEQ()))
+    steps.append(('num_capper', SteveNumericCapper(num_cols=['age'], max_val=30)))
+
+    num_cols = [ "count_floors_pre_eq", "age", "area_percentage", "height_percentage", "count_families",
+               "height_mult_area", "families_div_floors", "area_mult_age", "area_div_floors"]
+    steps.append(('num_normalizer', SteveNumericNormalizer(num_cols, drop_orig=True)))
+
+    pipe = Pipeline(steps)
+    return pipe
+        
 
 def get_pipeline_steps(study_name, pipe_name):
     # Have to create a new pipeline all the time, thanks to a bug in category_encoders:
@@ -339,8 +360,7 @@ def run_one(study_data, study_name, pipe_name, estimator):
     train_scores: estimated val score for each each CV fold
     """
     
-    steps = get_pipeline_steps(study_name, pipe_name)
-    pipe = Pipeline(steps)
+    pipe = get_eq_pipeline()
 
     pipe.fit(study_data.X, study_data.y)
     _X = pipe.transform(study_data.X)

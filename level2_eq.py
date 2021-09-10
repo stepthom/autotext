@@ -26,8 +26,9 @@ def main():
     args = parser.parse_args()
     
     trials_to_run = {}
-    trials_to_run["h1n1"]  = [33]
-    trials_to_run["seasonal"]  = [29]
+    #trials_to_run["h1n1"]  = [5950]
+    #trials_to_run["seasonal"]  = [1171]
+    trials_to_run["eq"]  = [479]
     
     for study_name, trial_numbers in trials_to_run.items():
         print("Study name {}".format(study_name))
@@ -39,9 +40,11 @@ def main():
             print("Trial number {}".format(trial_number))
             trial =  study.trials[trial_number]
             params = trial.params
-            estimator_name = trial.user_attrs['estimator_name']
+            estimator_name = trial.user_attrs.get('estimator_name', "lgbm")
             estimator_params = trial.user_attrs['estimator_params']
             metrics = trial.user_attrs['metrics']
+            
+            pipe_name = params.get('pipe_name', '01')
 
             pprint(params)
             pprint(metrics)
@@ -54,10 +57,10 @@ def main():
 
             estimator = None
             if estimator_name == "lgbm":
-                params['n_estimators'] = n_estimators
+                estimator_params['n_estimators'] = n_estimators
                 estimator = LGBMClassifier(**estimator_params)
             elif estimator_name == "xgboost":
-                params['n_estimators'] = n_estimators
+                estimator_params['n_estimators'] = n_estimators
                 estimator = XGBClassifier(**estimator_params)
             elif estimator_name == "rf":
                 estimator = RandomForestClassifier(**estimator_params)
@@ -68,32 +71,35 @@ def main():
             else:
                 print("Unknown estimator name {}".format(estimator_name))
 
-            pipe, estimator = run_one(study_data, study_name, params['pipe_name'], estimator)
-
-            if args.skip_output == 1:
-                print("Not producing predictions files. Returning.")
-                return
-
-            _X_test = pipe.transform(study_data.X_test)
-            probas = estimator.predict_proba(_X_test)
-            preds  = estimator.predict(_X_test)
-            preds = study_data.label_transformer.inverse_transform(preds)
-
-            id_col = study.user_attrs['id_col']
-            target_col = study.user_attrs['target_col']
-            out_dir = study.user_attrs['out_dir']
+            pipe, estimator = run_one(study_data, study_name, pipe_name, estimator)
             
-            preds_df = pd.DataFrame(data={'id': study_data.test_df[id_col], target_col: preds})
-            preds_fn = os.path.join(out_dir, "{}-{}-preds.csv".format(study_name, trial_number))
-            preds_df.to_csv(preds_fn, index=False)
-            print("level2: Wrote preds file: {}".format(preds_fn))
 
-            probas_df = pd.DataFrame(probas, columns=study_data.label_transformer.classes_)
-            probas_df[id_col] = study_data.test_df[id_col]
-            probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
-            probas_fn = os.path.join(out_dir, "{}-{}-probas.csv".format(study_name, trial_number))
-            probas_df.to_csv(probas_fn, index=False)
-            print("level2: Wrote probas file: {}".format(probas_fn))
+            if args.skip_output == 0:
+                _X_test = pipe.transform(study_data.X_test)
+                probas = estimator.predict_proba(_X_test)
+                preds  = estimator.predict(_X_test)
+                preds = study_data.label_transformer.inverse_transform(preds)
+
+                id_col = study.user_attrs['id_col']
+                target_col = study.user_attrs['target_col']
+                out_dir = study.user_attrs['out_dir']
+
+                preds_df = pd.DataFrame(data={'id': study_data.test_df[id_col], target_col: preds})
+                preds_fn = os.path.join(out_dir, "{}-{}-preds.csv".format(study_name, trial_number))
+                preds_df.to_csv(preds_fn, index=False)
+                print("level2: Wrote preds file: {}".format(preds_fn))
+
+                probas_df = pd.DataFrame(probas, columns=study_data.label_transformer.classes_)
+                probas_df[id_col] = study_data.test_df[id_col]
+                probas_df = probas_df[ [id_col] + [ col for col in probas_df.columns if col != id_col ] ]
+                probas_fn = os.path.join(out_dir, "{}-{}-probas.csv".format(study_name, trial_number))
+                probas_df.to_csv(probas_fn, index=False)
+                print("level2: Wrote probas file: {}".format(probas_fn))
+            
+            print("Feature importances:")
+            imp = pd.DataFrame({'Feature': estimator.feature_name_, 'Importance': estimator.feature_importances_})
+            imp = imp.sort_values('Importance', ascending=False)
+            print(imp.head(20))
             
 if __name__ == "__main__":
     main()
