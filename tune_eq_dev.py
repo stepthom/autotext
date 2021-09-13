@@ -23,6 +23,7 @@ from SteveHelpers import dump_json, get_data_types, read_json
 from SteveHelpers import check_dataframe, check_array
 from SteveHelpers import estimate_metrics
 from SteveHelpers import StudyData
+from SteveHelpers import get_eq_pipeline
 from SteveHelpers import SteveEncoder, SteveNumericCapper, SteveFeatureCombinerEQ, SteveNumericNormalizer
 
 def main():
@@ -43,48 +44,35 @@ def main():
         
     def objective(trial, study_data):
         
-        cat_cols = [
-                "geo_level_1_id", "geo_level_2_id", "geo_level_3_id",
-                "land_surface_condition", "foundation_type", "roof_type", 
-                "ground_floor_type", "other_floor_type", "position", "plan_configuration",  "legal_ownership_status"]
-        
-        steps = []
-        steps.append(('ord_encoder',  SteveEncoder( 
-            cols=cat_cols, suffix="_oenc", drop_orig=True,
-            encoder=OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
-        )))
-        steps.append(('combiner1', SteveFeatureCombinerEQ()))
-        steps.append(('num_capper', SteveNumericCapper(num_cols=['age'], max_val=30)))
-                     
-        num_cols = [ "count_floors_pre_eq", "age", "area_percentage", "height_percentage", "count_families",
-                   "height_mult_area", "families_div_floors", "area_mult_age", "area_div_floors"]
-        steps.append(('num_normalizer', SteveNumericNormalizer(num_cols, drop_orig=True)))
-        
-        pipe = Pipeline(steps)
+        pipe = get_eq_pipeline()
     
-        upper = 4096
         params = {
-              "max_bin": trial.suggest_int("max_bin", 32, 512),
-              "num_leaves": trial.suggest_int("num_leaves", 4, upper, log=True),
-              "min_child_weight": trial.suggest_loguniform("min_child_weight", 0.001, 128),
+              #"max_depth": trial.suggest_int("max_depth", 4, 16),
+              #"num_leaves": trial.suggest_int("num_leaves", , 127, log=True),
+              "learning_rate": trial.suggest_loguniform("learning_rate", 1/128, 0.2),
+              "min_child_weight": trial.suggest_loguniform("min_child_weight", 0.001, 1),
               "min_child_samples": trial.suggest_int("min_child_samples", 2, 2**7, log=True),
-              "learning_rate": trial.suggest_loguniform("learning_rate", 1/256, 2.0),
-              "feature_fraction_bynode":  trial.suggest_float("feature_fraction_bynode", 0.01, 1.0),
-              "colsample_bytree": trial.suggest_float("colsample_bytree", 0.01, 1.0),
-              "subsample_freq": 10,
-              "subsample": trial.suggest_float("subsample", 0.10, 1.0),
-              "reg_alpha": trial.suggest_loguniform("reg_alpha", 1/1024, 1024),
-              "reg_lambda": trial.suggest_loguniform("reg_lambda", 1/1024, 1024),
+              "feature_fraction_bynode":  trial.suggest_float("feature_fraction_bynode", 0.01, 0.8),
+              "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 0.9),
             
-              "cat_smooth": trial.suggest_float("cat_smooth", 5, 25),
-              "cat_l2": trial.suggest_float("cat_l2", 5, 25),
-              "min_data_per_group": trial.suggest_int("min_data_per_group", 50, 200),
+              "subsample_freq": 1,
+              "subsample": trial.suggest_float("subsample", 0.10, 1.0),
+            
+              "reg_alpha": trial.suggest_loguniform("reg_alpha", 1/128, 8),
+              "reg_lambda": trial.suggest_loguniform("reg_lambda", 1/128, 8),
+              "path_smooth": trial.suggest_loguniform("path_smooth", 0.001, 1.0),
+            
+              "cat_smooth": trial.suggest_float("cat_smooth", 5, 50),
+              "cat_l2": trial.suggest_float("cat_l2", 5, 50),
+              "min_data_per_group": trial.suggest_int("min_data_per_group", 100, 250),
             
               "extra_trees": False,
               "is_unbalance": True,
-              "n_estimators": 3000,
+              "n_estimators": 1500,
+              "max_bin": 127,
+              "max_depth": 31,
+              "num_leaves": 127,
               "boosting_type": 'gbdt',
-              "max_depth": -1,
               "n_jobs": 5,
               "verbosity": -1,
               "seed": 77,
@@ -123,9 +111,9 @@ def main():
             indices =  [i for i, ix in enumerate(_X_train.columns.values) if "_oenc" in ix]
             print("categorical indices: {}".format(indices))
             extra_fit_params = {
-                    'eval_set': [(_X_val, y_val)],
-                    'early_stopping_rounds': 50,
-                    'verbose': 200,
+                    #'eval_set': [(_X_val, y_val)],
+                    #'early_stopping_rounds': 50,
+                    #'verbose': 200,
                     'categorical_feature': indices, 
                 }
 
@@ -159,7 +147,7 @@ def main():
             train_times.append(train_time)
             val_scores.append(val_score)
             train_scores.append(train_score)
-            best_iterations.append(bi)
+            #best_iterations.append(bi)
 
         def mean_confidence_interval(data, confidence=0.95):
             a = 1.0 * np.array(data)
@@ -185,8 +173,18 @@ def main():
         # Log for later
         trial.set_user_attr("estimator_params", params)
         trial.set_user_attr("metrics", metrics)
+        
+        val = np.mean(val_scores)
+        train = np.mean(train_scores)
+        score = val - (0.1*(train-val))
+        
+        # Log for later
+        trial.set_user_attr("estimator_params", params)
+        trial.set_user_attr("metrics", metrics)
+        trial.set_user_attr("val", val)
+        trial.set_user_attr("train", train)
 
-        return np.mean(val_scores)
+        return val
     
     study = optuna.load_study(study_name=study_name, storage=args['storage'])
     study_data = StudyData(study, args['sample_frac'])
