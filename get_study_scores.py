@@ -15,8 +15,8 @@ if __name__ == "__main__":
         print("Study: {}".format(study_name))
 
         study = optuna.load_study( study_name=study_name, storage=args.optuna_storage)
-        df = study.trials_dataframe(attrs=("number", "value", "duration", "params", "state"))
-        #df = study.trials_dataframe()
+        
+        df = study.trials_dataframe()
         if len(df) > 0:
             print(df['state'].value_counts())
             print("Most recent:")

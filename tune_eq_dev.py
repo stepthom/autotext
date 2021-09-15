@@ -44,6 +44,8 @@ def main():
         
     def objective(trial, study_data):
         
+        print('objective: study sampler: {}'.format(study.sampler))
+        
         pipe = get_eq_pipeline()
     
         params = {
@@ -68,7 +70,7 @@ def main():
             
               "extra_trees": False,
               "is_unbalance": True,
-              "n_estimators": 1500,
+              "n_estimators": 2500,
               "max_bin": 127,
               "max_depth": 31,
               "num_leaves": 127,
@@ -111,9 +113,9 @@ def main():
             indices =  [i for i, ix in enumerate(_X_train.columns.values) if "_oenc" in ix]
             print("categorical indices: {}".format(indices))
             extra_fit_params = {
-                    #'eval_set': [(_X_val, y_val)],
-                    #'early_stopping_rounds': 50,
-                    #'verbose': 200,
+                    'eval_set': [(_X_val, y_val)],
+                    'early_stopping_rounds': 50,
+                    'verbose': 200,
                     'categorical_feature': indices, 
                 }
 
@@ -130,7 +132,6 @@ def main():
             print("val_score = {}".format(val_score))
             #print(classification_report(y_val, y_val_pred, digits=4))
             
-
             print("estimate_metric: calc Train metrics. ")
             #y_train_pred_proba = estimator.predict_proba(_X_train)
             y_train_pred = estimator.predict(_X_train)
@@ -147,7 +148,7 @@ def main():
             train_times.append(train_time)
             val_scores.append(val_score)
             train_scores.append(train_score)
-            #best_iterations.append(bi)
+            best_iterations.append(bi)
 
         def mean_confidence_interval(data, confidence=0.95):
             a = 1.0 * np.array(data)
@@ -186,7 +187,16 @@ def main():
 
         return val
     
-    study = optuna.load_study(study_name=study_name, storage=args['storage'])
+    sampler= optuna.samplers.TPESampler(
+        n_startup_trials = 300,
+        multivariate = True,
+        n_ei_candidates = 10,
+        constant_liar=True,
+    )
+    
+    #sampler= optuna.samplers.RandomSampler()
+    
+    study = optuna.load_study(study_name=study_name, storage=args['storage'], sampler=sampler)
     study_data = StudyData(study, args['sample_frac'])
     
     study.optimize(lambda trial: objective(trial, study_data),

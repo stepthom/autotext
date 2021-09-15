@@ -64,22 +64,34 @@ class StudyData:
         self.y = self.label_transformer.fit_transform(self.y)
         
 def get_eq_pipeline():
+    steps = []
+    
+    drop_cols = [
+        'has_secondary_use_agriculture', 'has_secondary_use_hotel', 'has_superstructure_rc_engineered',
+        'has_secondary_use_rental', 'has_secondary_use_other', 'has_secondary_use_industry',
+        'has_secondary_use_institution', 'has_secondary_use_school', 'has_secondary_use_gov_office',
+        'has_secondary_use_health_post', 'has_secondary_use_use_police',
+        
+        'has_superstructure_rc_non_engineered',
+        'has_superstructure_other',
+    ]
+    steps.append(('dropper', SteveFeatureDropper(drop_cols)))
+    
     cat_cols = [
             "geo_level_1_id", "geo_level_2_id", "geo_level_3_id",
             "land_surface_condition", "foundation_type", "roof_type", 
             "ground_floor_type", "other_floor_type", "position", "plan_configuration",  "legal_ownership_status"]
 
-    steps = []
     steps.append(('ord_encoder',  SteveEncoder( 
         cols=cat_cols, suffix="_oenc", drop_orig=True,
         encoder=OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1, dtype=np.int32),
     )))
     steps.append(('combiner1', SteveFeatureCombinerEQ()))
-    steps.append(('num_capper', SteveNumericCapper(num_cols=['age'], max_val=30)))
+    steps.append(('num_capper', SteveNumericCapper(num_cols=['age'], max_val=35)))
 
     num_cols = [ "count_floors_pre_eq", "age", "area_percentage", "height_percentage", "count_families",
                "height_mult_area", "families_div_floors", "area_mult_age", "area_div_floors"]
-    steps.append(('num_normalizer', SteveNumericNormalizer(num_cols, drop_orig=True)))
+    steps.append(('num_normalizer', SteveNumericNormalizer(num_cols, drop_orig=True, do_kbins=False)))
 
     pipe = Pipeline(steps)
     return pipe
@@ -1026,15 +1038,18 @@ class SteveNumericCapper(BaseEstimator, TransformerMixin):
         return _X
  
 class SteveNumericNormalizer(BaseEstimator, TransformerMixin):
-    def __init__(self, float_cols=None, drop_orig=False):
+    def __init__(self, float_cols=None, drop_orig=False, do_kbins=True):
         self.float_cols = float_cols
         self.drop_orig = drop_orig
         self.scaler = StandardScaler()
+        self.do_kbins = do_kbins
         self.kbins = KBinsDiscretizer(n_bins=10, encode='ordinal', strategy='quantile')
         
     def fit(self, X, y=None):
         self.scaler.fit(X[self.float_cols])
-        self.kbins.fit(X[self.float_cols])
+        
+        if self.do_kbins:
+            self.kbins.fit(X[self.float_cols])
         return self
 
     def transform(self, X, y=None):
@@ -1044,9 +1059,10 @@ class SteveNumericNormalizer(BaseEstimator, TransformerMixin):
         _new_cols = pd.DataFrame(_new_cols, columns=["{}_scale".format(c) for c in self.float_cols])
         _X = pd.concat([_X, _new_cols], axis=1, ignore_index=False)
         
-        _new_cols = self.kbins.transform(_X[self.float_cols])
-        _new_cols = pd.DataFrame(_new_cols, columns=["{}_kbins".format(c) for c in self.float_cols])
-        _X = pd.concat([_X, _new_cols], axis=1, ignore_index=False)
+        if self.do_kbins:
+            _new_cols = self.kbins.transform(_X[self.float_cols])
+            _new_cols = pd.DataFrame(_new_cols, columns=["{}_kbins".format(c) for c in self.float_cols])
+            _X = pd.concat([_X, _new_cols], axis=1, ignore_index=False)
         
         if self.drop_orig:
             _X = _X.drop(self.float_cols, axis=1)
