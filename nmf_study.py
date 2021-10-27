@@ -27,71 +27,6 @@ import datetime
 import jsonpickle
 
 
-def get_metrics(y_true, y_pred):
-    res = {}
-    res['accuracy'] = accuracy_score(y_true, y_pred)
-    res['f1'] = f1_score(y_true, y_pred, average="macro")
-    res['recall'] = recall_score(y_true, y_pred, average="macro")
-    res['precision'] = precision_score(y_true, y_pred, average="macro")
-    res['report'] = classification_report(y_true, y_pred, output_dict=True)
-    return res
-
-
-scorer = autosklearn.metrics.make_scorer(
-    'f1_score',
-    sklearn.metrics.f1_score
-)
-
-
-def do_autosklearn(runname, config, datasets):
-    res = {}
-
-    time = config.get('time_left_for_this_task', 100)
-    jobs = config.get('n_jobs', 1)
-
-    pipe = autosklearn.classification.AutoSklearnClassifier(
-        time_left_for_this_task=time,
-        metric=scorer,
-        n_jobs=jobs,
-        seed=42,
-        memory_limit=9072,
-        exclude_estimators=[
-            "k_nearest_neighbors",
-            "mlp",
-            "gaussian_nb",
-            "bernoulli_nb",
-            "multinomial_nb",
-            "decision_tree",
-            "lda",
-            "liblinear_svc",
-            "libsvm_svc",
-            "qda"]
-    )
-
-
-    print("Running autosklearn for {} seconds on {} jobs...".format(time, jobs))
-    res['starttime'] = str(datetime.datetime.now())
-    pipe = pipe.fit(datasets.X_train, datasets.y_train )
-    res['endtime'] = str(datetime.datetime.now())
-    print("... done fitting autosklearn.")
-
-    res['show_models'] = jsonpickle.encode(pipe.show_models(), unpicklable=False, keys=True)
-    res['stats'] = jsonpickle.encode(pipe.sprint_statistics(), unpicklable=False, keys=True)
-    res['params'] = jsonpickle.encode(pipe.get_params(), unpicklable=False, keys=True)
-
-    _preds_train = pipe.predict(datasets.X_train)
-    res['metrics_train'] = get_metrics(datasets.y_train, _preds_train)
-
-    if (datasets.X_val is not None) and (datasets.y_val is not None):
-        _preds_val = pipe.predict(datasets.X_val)
-        res['metrics_val'] = get_metrics(datasets.y_val, _preds_val)
-
-    _preds_test = pipe.predict(datasets.X_test)
-    if datasets.y_test is not None:
-        res['metrics_test'] = get_metrics(datasets.y_test, _preds_test)
-
-    return res
-
 
 def do_lr(runname, config, datasets):
     res = {}
@@ -170,18 +105,14 @@ def do_flaml(runname, config, datasets):
         "n_jobs": jobs,
         "estimator_list": ['lgbm', 'xgboost', 'catboost', 'extra_tree'],
         "model_history": True,
-        "eval_method": "cv",
-        "n_splits": 5,
-        "log_training_metric": True,
-        "verbose": 2,
     }
 
     res['automl_settings'] = jsonpickle.encode(automl_settings, unpicklable=False, keys=True)
 
     print("Running FLAML with {} jobs for {} seconds...".format(jobs, time))
     res['starttime'] = str(datetime.datetime.now())
-    pipe.fit(datasets.X_train, datasets.y_train, X_val=datasets.X_test,
-             y_val=datasets.y_test, **automl_settings)
+    pipe.fit(datasets.X_train, datasets.y_train, X_val=datasets.X_val,
+             y_val=datasets.y_val, **automl_settings)
     res['endtime'] = str(datetime.datetime.now())
     print("... done running FLAML.")
 
@@ -357,22 +288,9 @@ def main():
 
     dump_results(runname, results)
 
+    pipe = Pipeline
 
-    _do_lr = config.get('do_lr', False)
-    _do_flaml = config.get('do_flaml', True)
-    _do_autosklearn = config.get('do_autosklearn', False)
 
-    if _do_lr:
-        datasets, results['lr'] = do_lr(runname, config, datasets)
-        dump_results(runname, results)
-
-    if _do_flaml:
-        datasets, results['flaml'] = do_flaml(runname, config, datasets)
-        dump_results(runname, results)
-
-    if _do_autosklearn:
-        results['autosklearn'] = do_autosklearn(runname, config, datasets)
-        dump_results(runname, results)
 
     results['endtime'] = str(datetime.datetime.now())
 
